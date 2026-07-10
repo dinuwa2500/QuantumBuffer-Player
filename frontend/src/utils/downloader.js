@@ -29,7 +29,7 @@ export function formatETA(seconds) {
  * @param {Function} options.onProgress Callback for progress: (data) => {}
  * @param {AbortSignal} options.signal AbortController signal for cancellation
  */
-export async function bufferVideo(videoUrl, { onProgress, signal }) {
+export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal }) {
   const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
   const encodedUrl = encodeURIComponent(videoUrl);
   
@@ -108,51 +108,60 @@ export async function bufferVideo(videoUrl, { onProgress, signal }) {
       }
     };
 
-    const downloadNext = async () => {
-      if (hasFailed || signal?.aborted) return;
+    const downloadLoop = async () => {
+      while (nextChunkIndex < totalChunks && !hasFailed && !signal?.aborted) {
+        const isThrottled = checkThrottle ? checkThrottle() : false;
+        const maxConcurrency = isThrottled ? 1 : CONCURRENCY;
 
-      if (nextChunkIndex >= totalChunks) {
-        if (activeDownloads === 0) {
+        if (activeDownloads >= maxConcurrency) {
+          // Wait a small bit and check again
+          await new Promise(r => setTimeout(r, 100));
+          continue;
+        }
+
+        // If throttled, add a delay between chunk requests to give the player priority
+        if (isThrottled && activeDownloads > 0) {
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+
+        const index = nextChunkIndex++;
+        activeDownloads++;
+
+        // Run download in an IIFE to allow other parallel loops
+        (async () => {
+          const start = index * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE - 1, totalBytes - 1);
+
           try {
-            const videoBlob = new Blob(chunks, { type: contentType });
-            resolve({
-              blob: videoBlob,
-              size: loadedBytes,
-              contentType
-            });
+            const segmentData = await downloadChunkWithRetry(proxyUrl, start, end, (bytesRead) => {
+              loadedBytes += bytesRead;
+              checkProgress();
+            }, signal);
+
+            chunks[index] = segmentData;
+            activeDownloads--;
+
+            // Check if download is complete
+            if (nextChunkIndex >= totalChunks && activeDownloads === 0 && !hasFailed) {
+              const videoBlob = new Blob(chunks, { type: contentType });
+              resolve({
+                blob: videoBlob,
+                size: loadedBytes,
+                contentType
+              });
+            }
           } catch (err) {
+            hasFailed = true;
+            activeDownloads--;
             reject(err);
           }
-        }
-        return;
-      }
-
-      const index = nextChunkIndex++;
-      activeDownloads++;
-
-      const start = index * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE - 1, totalBytes - 1);
-
-      try {
-        const segmentData = await downloadChunkWithRetry(proxyUrl, start, end, (bytesRead) => {
-          loadedBytes += bytesRead;
-          checkProgress();
-        }, signal);
-
-        chunks[index] = segmentData;
-        activeDownloads--;
-        
-        downloadNext();
-      } catch (err) {
-        hasFailed = true;
-        reject(err);
+        })();
       }
     };
 
-    // Start initial concurrent downloads
-    for (let i = 0; i < Math.min(CONCURRENCY, totalChunks); i++) {
-      downloadNext();
-    }
+    // Kick off the loop
+    downloadLoop();
 
     if (signal) {
       signal.addEventListener('abort', () => {

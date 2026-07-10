@@ -39,6 +39,13 @@ export default function App() {
   const [activeVideo, setActiveVideo] = useState(null);
   
   const abortControllerRef = useRef(null);
+  const isPlayerPlayingRef = useRef(false);
+  const activeVideoRef = useRef(null);
+
+  // Sync activeVideo to ref for downloader access
+  useEffect(() => {
+    activeVideoRef.current = activeVideo;
+  }, [activeVideo]);
 
   // Initialize DB and fetch library list
   useEffect(() => {
@@ -114,6 +121,14 @@ export default function App() {
       const result = await bufferVideo(videoUrl, {
         onProgress: (progressData) => {
           setProgress(progressData);
+        },
+        checkThrottle: () => {
+          return (
+            isPlayerPlayingRef.current &&
+            activeVideoRef.current &&
+            activeVideoRef.current.blobUrl &&
+            activeVideoRef.current.blobUrl.includes('/api/proxy')
+          );
         },
         signal: abortControllerRef.current.signal
       });
@@ -383,6 +398,9 @@ export default function App() {
                 src={activeVideo.blobUrl}
                 title={activeVideo.title}
                 onClose={handleClosePlayer}
+                onPlayStateChange={(playing) => {
+                  isPlayerPlayingRef.current = playing;
+                }}
               />
             </div>
           ) : (

@@ -26,7 +26,7 @@ const CloseIcon = () => (
   <svg className="icon-md fill-current" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
 );
 
-export default function CustomPlayer({ src, title, onClose }) {
+export default function CustomPlayer({ src, title, onClose, onPlayStateChange }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -38,6 +38,13 @@ export default function CustomPlayer({ src, title, onClose }) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+
+  // Sync play state to parent
+  useEffect(() => {
+    if (onPlayStateChange) {
+      onPlayStateChange(isPlaying);
+    }
+  }, [isPlaying, onPlayStateChange]);
   
   const controlsTimeoutRef = useRef(null);
   const prevSrcRef = useRef(src);
