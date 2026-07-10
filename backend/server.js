@@ -13,6 +13,11 @@ app.use(cors({
   exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges']
 }));
 
+// Root route / health check
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', message: 'CORS Proxy Server is running' });
+});
+
 // Route to get metadata for a video URL (Content-Length, Content-Type)
 app.get('/api/info', async (req, res) => {
   const videoUrl = req.query.url;
@@ -122,6 +127,11 @@ app.get('/api/proxy', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`CORS Proxy Server running on http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`CORS Proxy Server running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;
+

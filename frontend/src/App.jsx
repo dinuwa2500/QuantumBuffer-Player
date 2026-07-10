@@ -98,7 +98,8 @@ export default function App() {
 
     const title = getTitleFromUrl(videoUrl);
     const id = 'vid_' + Date.now();
-    const proxyUrl = `http://localhost:5000/api/proxy?url=${encodeURIComponent(videoUrl)}`;
+    const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(videoUrl)}`;
 
     // Play proxy stream immediately
     setActiveVideo({

@@ -30,7 +30,7 @@ export function formatETA(seconds) {
  * @param {AbortSignal} options.signal AbortController signal for cancellation
  */
 export async function bufferVideo(videoUrl, { onProgress, signal }) {
-  const backendBaseUrl = 'http://localhost:5000';
+  const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
   const encodedUrl = encodeURIComponent(videoUrl);
   
   // 1. Fetch metadata first to get Content-Length and Content-Type
