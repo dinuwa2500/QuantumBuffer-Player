@@ -91,13 +91,14 @@ app.get('/api/proxy', async (req, res) => {
       headers['Range'] = req.headers.range;
     }
 
-    const response = await axios({
-      method: 'get',
-      url: videoUrl,
-      headers: headers,
-      responseType: 'stream',
-      timeout: 60000, // 60 seconds timeout
+    const response = await fetch(videoUrl, {
+      method: 'GET',
+      headers: headers
     });
+
+    if (!response.ok) {
+      return res.status(response.status).send(`Failed to fetch video: ${response.statusText}`);
+    }
 
     // Copy relevant headers back to the browser
     const responseHeaders = {
@@ -106,24 +107,37 @@ app.get('/api/proxy', async (req, res) => {
       'Access-Control-Expose-Headers': '*',
     };
 
-    if (response.headers['content-type']) {
-      responseHeaders['Content-Type'] = response.headers['content-type'];
-    }
-    if (response.headers['content-length']) {
-      responseHeaders['Content-Length'] = response.headers['content-length'];
-    }
-    if (response.headers['content-range']) {
-      responseHeaders['Content-Range'] = response.headers['content-range'];
-    }
-    if (response.headers['accept-ranges']) {
-      responseHeaders['Accept-Ranges'] = response.headers['accept-ranges'];
-    }
+    const contentType = response.headers.get('content-type');
+    const contentLength = response.headers.get('content-length');
+    const contentRange = response.headers.get('content-range');
+    const acceptRanges = response.headers.get('accept-ranges');
+
+    if (contentType) responseHeaders['Content-Type'] = contentType;
+    if (contentLength) responseHeaders['Content-Length'] = contentLength;
+    if (contentRange) responseHeaders['Content-Range'] = contentRange;
+    if (acceptRanges) responseHeaders['Accept-Ranges'] = acceptRanges;
 
     res.writeHead(response.status, responseHeaders);
-    response.data.pipe(res);
+
+    // Pipe the web stream to the Node.js response
+    const reader = response.body.getReader();
+    let isClosed = false;
+
+    req.on('close', () => {
+      isClosed = true;
+      reader.cancel().catch(() => {});
+    });
+
+    // Read and write chunks
+    while (!isClosed) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(value);
+    }
+    res.end();
   } catch (error) {
     console.error('Proxy stream failed:', error.message);
-    res.status(error.response?.status || 500).send(error.message);
+    res.status(500).send(error.message);
   }
 });
 

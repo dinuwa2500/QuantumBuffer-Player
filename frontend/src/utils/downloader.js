@@ -44,20 +44,179 @@ export async function bufferVideo(videoUrl, { onProgress, signal }) {
   } catch (err) {
     if (err.name === 'AbortError') throw err;
     console.warn('Could not retrieve metadata, falling back to streaming defaults.', err);
-    info = { contentLength: null, contentType: 'video/mp4' };
+    info = { contentLength: null, contentType: 'video/mp4', acceptRanges: false };
   }
 
   const totalBytes = info.contentLength;
   const contentType = info.contentType || 'video/mp4';
-
-  // 2. Fetch the stream through our proxy
+  const acceptRanges = info.acceptRanges;
   const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
-  const response = await fetch(proxyUrl, { signal });
-  
-  if (!response.ok) {
-    throw new Error(`Proxy request failed: ${response.statusText}`);
+
+  // Fallback to single stream if metadata/ranges are not supported
+  if (!totalBytes || !acceptRanges) {
+    return downloadSingleStream(proxyUrl, totalBytes, contentType, onProgress, signal);
   }
 
+  // Segmented Parallel Chunk Downloader
+  const CHUNK_SIZE = 3 * 1024 * 1024; // 3MB chunks
+  const CONCURRENCY = 4; // 4 parallel connections
+  
+  const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
+  const chunks = new Array(totalChunks);
+  let loadedBytes = 0;
+  
+  const startTime = performance.now();
+  let lastTime = startTime;
+  let lastLoaded = 0;
+  let smoothedSpeed = 0;
+
+  let nextChunkIndex = 0;
+  let activeDownloads = 0;
+  let hasFailed = false;
+
+  return new Promise((resolve, reject) => {
+    const checkProgress = () => {
+      const currentTime = performance.now();
+      const elapsedTime = (currentTime - startTime) / 1000;
+      const intervalTime = (currentTime - lastTime) / 1000;
+
+      if (intervalTime >= 0.5) {
+        const intervalLoaded = loadedBytes - lastLoaded;
+        const instantSpeed = intervalLoaded / intervalTime;
+        smoothedSpeed = smoothedSpeed === 0 ? instantSpeed : (smoothedSpeed * 0.7) + (instantSpeed * 0.3);
+        lastTime = currentTime;
+        lastLoaded = loadedBytes;
+      }
+
+      const averageSpeed = loadedBytes / (elapsedTime || 0.1);
+      const activeSpeed = smoothedSpeed || averageSpeed;
+      const percentage = (loadedBytes / totalBytes) * 100;
+      const remainingBytes = totalBytes - loadedBytes;
+      const eta = activeSpeed > 0 ? remainingBytes / activeSpeed : 0;
+
+      if (onProgress) {
+        onProgress({
+          percentage: parseFloat(percentage.toFixed(1)),
+          loadedBytes,
+          totalBytes,
+          loadedFormatted: formatBytes(loadedBytes),
+          totalFormatted: formatBytes(totalBytes),
+          speedFormatted: `${formatBytes(activeSpeed)}/s`,
+          etaFormatted: formatETA(eta),
+          etaSeconds: eta
+        });
+      }
+    };
+
+    const downloadNext = async () => {
+      if (hasFailed || signal?.aborted) return;
+
+      if (nextChunkIndex >= totalChunks) {
+        if (activeDownloads === 0) {
+          try {
+            const videoBlob = new Blob(chunks, { type: contentType });
+            resolve({
+              blob: videoBlob,
+              size: loadedBytes,
+              contentType
+            });
+          } catch (err) {
+            reject(err);
+          }
+        }
+        return;
+      }
+
+      const index = nextChunkIndex++;
+      activeDownloads++;
+
+      const start = index * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE - 1, totalBytes - 1);
+
+      try {
+        const segmentData = await downloadChunkWithRetry(proxyUrl, start, end, (bytesRead) => {
+          loadedBytes += bytesRead;
+          checkProgress();
+        }, signal);
+
+        chunks[index] = segmentData;
+        activeDownloads--;
+        
+        downloadNext();
+      } catch (err) {
+        hasFailed = true;
+        reject(err);
+      }
+    };
+
+    // Start initial concurrent downloads
+    for (let i = 0; i < Math.min(CONCURRENCY, totalChunks); i++) {
+      downloadNext();
+    }
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        hasFailed = true;
+        reject(new DOMException('Aborted', 'AbortError'));
+      });
+    }
+  });
+}
+
+/**
+ * Downloads a single chunk with retry logic
+ */
+async function downloadChunkWithRetry(url, start, end, onProgress, signal, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: { Range: `bytes=${start}-${end}` },
+        signal
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`);
+      }
+
+      const reader = response.body.getReader();
+      const chunks = [];
+      let bytesDownloaded = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        bytesDownloaded += value.length;
+        onProgress(value.length);
+      }
+
+      const segment = new Uint8Array(bytesDownloaded);
+      let offset = 0;
+      for (const chunk of chunks) {
+        segment.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return segment;
+    } catch (err) {
+      if (err.name === 'AbortError' || signal?.aborted) {
+        throw err;
+      }
+      if (attempt === retries) {
+        throw new Error(`Failed to download range ${start}-${end} after ${retries} attempts: ${err.message}`);
+      }
+      await new Promise(r => setTimeout(r, attempt * 500));
+    }
+  }
+}
+
+/**
+ * Graceful fallback to single continuous stream download
+ */
+async function downloadSingleStream(url, totalBytes, contentType, onProgress, signal) {
+  const response = await fetch(url, { signal });
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.statusText}`);
+  }
   if (!response.body) {
     throw new Error('Response body is empty or not readable.');
   }
@@ -66,42 +225,31 @@ export async function bufferVideo(videoUrl, { onProgress, signal }) {
   const chunks = [];
   let loadedBytes = 0;
   const startTime = performance.now();
-  
-  // Speed calculation variables (sliding window for smoother speed reporting)
   let lastTime = startTime;
   let lastLoaded = 0;
-  let smoothedSpeed = 0; // bytes/sec
+  let smoothedSpeed = 0;
 
   while (true) {
     const { done, value } = await reader.read();
-    
-    if (done) {
-      break;
-    }
+    if (done) break;
 
     chunks.push(value);
     loadedBytes += value.length;
 
-    // Calculate speed and progress
     const currentTime = performance.now();
-    const elapsedTime = (currentTime - startTime) / 1000; // total elapsed in seconds
-    const intervalTime = (currentTime - lastTime) / 1000; // interval in seconds
+    const elapsedTime = (currentTime - startTime) / 1000;
+    const intervalTime = (currentTime - lastTime) / 1000;
 
-    if (intervalTime >= 0.5) { // Update speed calculation every 500ms
+    if (intervalTime >= 0.5) {
       const intervalLoaded = loadedBytes - lastLoaded;
-      const instantSpeed = intervalLoaded / intervalTime; // bytes per second
-      
-      // Apply exponential smoothing (0.7 old speed, 0.3 new speed)
+      const instantSpeed = intervalLoaded / intervalTime;
       smoothedSpeed = smoothedSpeed === 0 ? instantSpeed : (smoothedSpeed * 0.7) + (instantSpeed * 0.3);
-      
       lastTime = currentTime;
       lastLoaded = loadedBytes;
     }
 
-    // Backup speed calculation in case progress is very fast or slow
-    const averageSpeed = loadedBytes / (elapsedTime || 0.1); // bytes per second
+    const averageSpeed = loadedBytes / (elapsedTime || 0.1);
     const activeSpeed = smoothedSpeed || averageSpeed;
-
     const percentage = totalBytes ? (loadedBytes / totalBytes) * 100 : 0;
     const remainingBytes = totalBytes ? totalBytes - loadedBytes : 0;
     const eta = activeSpeed > 0 ? remainingBytes / activeSpeed : 0;
@@ -120,7 +268,6 @@ export async function bufferVideo(videoUrl, { onProgress, signal }) {
     }
   }
 
-  // 3. Compile chunks into a single Blob
   const videoBlob = new Blob(chunks, { type: contentType });
   return {
     blob: videoBlob,
