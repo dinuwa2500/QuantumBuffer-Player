@@ -128,11 +128,16 @@ app.get('/api/proxy', async (req, res) => {
       reader.cancel().catch(() => {});
     });
 
-    // Read and write chunks
+    // Read and write chunks with backpressure support
     while (!isClosed) {
       const { done, value } = await reader.read();
       if (done) break;
-      res.write(value);
+      
+      const canWrite = res.write(value);
+      if (!canWrite && !isClosed) {
+        // Wait for drain event if the client buffer is full
+        await new Promise((resolve) => res.once('drain', resolve));
+      }
     }
     res.end();
   } catch (error) {

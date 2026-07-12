@@ -142,18 +142,25 @@ export default function App() {
       setProgress(null);
       await fetchLibrary();
 
-      // Hot-swap player source to local Blob
-      const localBlob = result.blob;
-      const localBlobUrl = URL.createObjectURL(localBlob);
+      // Hot-swap player source to local stream or Blob URL
+      let localSourceUrl;
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        localSourceUrl = `/stream-video/${id}`;
+      } else {
+        const localBlob = result.blob;
+        localSourceUrl = URL.createObjectURL(localBlob);
+      }
 
       setActiveVideo(prev => {
         if (prev && prev.id === id) {
           return {
             ...prev,
-            blobUrl: localBlobUrl
+            blobUrl: localSourceUrl
           };
         } else {
-          URL.revokeObjectURL(localBlobUrl);
+          if (localSourceUrl.startsWith('blob:')) {
+            URL.revokeObjectURL(localSourceUrl);
+          }
           return prev;
         }
       });
@@ -178,6 +185,33 @@ export default function App() {
     }
   };
 
+  const handleDirectStream = (e) => {
+    if (e) e.preventDefault();
+    if (!videoUrl.trim()) return;
+
+    setErrorMessage('');
+    setStatusMessage('Loading direct cloud stream...');
+
+    const title = getTitleFromUrl(videoUrl);
+    const id = 'stream_' + Date.now();
+    const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(videoUrl)}`;
+
+    setActiveVideo({
+      id,
+      title,
+      blobUrl: proxyUrl,
+      isStreamingOnly: true
+    });
+
+    setVideoUrl('');
+    setStatusMessage('Streaming via Cloudflare Worker proxy.');
+
+    setTimeout(() => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }, 100);
+  };
+
   const handleCancelBuffer = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -191,19 +225,29 @@ export default function App() {
         URL.revokeObjectURL(activeVideo.blobUrl);
       }
 
-      setStatusMessage(`Loading ${video.title} from cache...`);
-      const blob = await getVideoBlob(video.id);
-      
-      if (!blob) {
-        throw new Error('Video cache could not be found or was deleted.');
-      }
+      // Check if Service Worker is active and controlling the page
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        setActiveVideo({
+          ...video,
+          blobUrl: `/stream-video/${video.id}`
+        });
+        setStatusMessage('');
+      } else {
+        // Fallback for private tabs or when service worker isn't ready
+        setStatusMessage(`Loading ${video.title} from cache (no streaming fallback)...`);
+        const blob = await getVideoBlob(video.id);
+        
+        if (!blob) {
+          throw new Error('Video cache could not be found or was deleted.');
+        }
 
-      const blobUrl = URL.createObjectURL(blob);
-      setActiveVideo({
-        ...video,
-        blobUrl
-      });
-      setStatusMessage('');
+        const blobUrl = URL.createObjectURL(blob);
+        setActiveVideo({
+          ...video,
+          blobUrl
+        });
+        setStatusMessage('');
+      }
       
       // Scroll smoothly to player
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -297,12 +341,24 @@ export default function App() {
                   required
                   className="input-field"
                 />
+              </div>
+              <div className="form-buttons-row">
+                <button
+                  type="button"
+                  onClick={handleDirectStream}
+                  disabled={isBuffering || !videoUrl}
+                  className="btn-secondary"
+                  style={{ flex: 1 }}
+                >
+                  <PlayIcon /> Stream Directly
+                </button>
                 <button
                   type="submit"
                   disabled={isBuffering || !videoUrl}
                   className="btn-primary"
+                  style={{ flex: 1 }}
                 >
-                  {isBuffering ? 'Buffering...' : 'Start Buffer'}
+                  {isBuffering ? 'Buffering to Cache...' : 'Buffer for Offline'}
                 </button>
               </div>
             </form>
@@ -401,6 +457,7 @@ export default function App() {
                 onPlayStateChange={(playing) => {
                   isPlayerPlayingRef.current = playing;
                 }}
+                isStreamingOnly={activeVideo.isStreamingOnly}
               />
             </div>
           ) : (

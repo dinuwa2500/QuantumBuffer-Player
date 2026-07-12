@@ -1149,3 +1149,19 @@ h1, h2, h3, h4, h5, h6 {
   color: #22d3ee;
   font-weight: 700;
 }
+
+/* Custom button row for two-action forms */
+.form-buttons-row {
+  display: flex;
+  gap: 1rem;
+  width: 100%;
+}
+
+/* Modifier classes for the video player overlay mode badge */
+.player-mode-tag.mode-offline {
+  color: #10b981; /* Emerald green for cached files */
+}
+
+.player-mode-tag.mode-streaming {
+  color: #3b82f6; /* Blue for cloud streaming */
+}

@@ -111,7 +111,7 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
     const downloadLoop = async () => {
       while (nextChunkIndex < totalChunks && !hasFailed && !signal?.aborted) {
         const isThrottled = checkThrottle ? checkThrottle() : false;
-        const maxConcurrency = isThrottled ? 1 : CONCURRENCY;
+        const maxConcurrency = isThrottled ? 2 : CONCURRENCY;
 
         if (activeDownloads >= maxConcurrency) {
           // Wait a small bit and check again
@@ -121,7 +121,7 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
 
         // If throttled, add a delay between chunk requests to give the player priority
         if (isThrottled && activeDownloads > 0) {
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 100));
           continue;
         }
 
