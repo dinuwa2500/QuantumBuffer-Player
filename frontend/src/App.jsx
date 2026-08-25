@@ -23,6 +23,12 @@ const PlayIcon = () => (
   </svg>
 );
 
+const CloudIcon = () => (
+  <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 00-9.78 2.096A4.001 4.001 0 003 15z" />
+  </svg>
+);
+
 const InfoIcon = () => (
   <svg className="icon-md text-neutral-400" style={{ color: 'hsl(var(--text-muted))' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -108,11 +114,14 @@ export default function App() {
     const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
     const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(videoUrl)}`;
 
-    // Play proxy stream immediately
+    // Play direct or proxy stream immediately while caching
     setActiveVideo({
       id,
       title,
-      blobUrl: proxyUrl
+      blobUrl: videoUrl,
+      directUrl: videoUrl,
+      proxyUrl: proxyUrl,
+      isStreamingOnly: false
     });
 
     try {
@@ -175,41 +184,49 @@ export default function App() {
       }
       setIsBuffering(false);
       setProgress(null);
-      // Close player if it is currently playing the buffering video
-      setActiveVideo(prev => {
-        if (prev && prev.id === id) {
-          return null;
-        }
-        return prev;
-      });
     }
   };
 
-  const handleDirectStream = (e) => {
+  const handleDirectStream = (e, useProxy = false) => {
     if (e) e.preventDefault();
     if (!videoUrl.trim()) return;
 
     setErrorMessage('');
-    setStatusMessage('Loading direct cloud stream...');
+    setStatusMessage(useProxy ? 'Loading stream via Cloudflare Worker...' : 'Loading direct browser stream (Your IP)...');
 
     const title = getTitleFromUrl(videoUrl);
     const id = 'stream_' + Date.now();
     const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
     const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(videoUrl)}`;
+    const streamSrc = useProxy ? proxyUrl : videoUrl;
 
     setActiveVideo({
       id,
       title,
-      blobUrl: proxyUrl,
-      isStreamingOnly: true
+      blobUrl: streamSrc,
+      directUrl: videoUrl,
+      proxyUrl: proxyUrl,
+      isStreamingOnly: true,
+      streamMode: useProxy ? 'Cloudflare Proxy' : 'Direct Browser Stream'
     });
 
     setVideoUrl('');
-    setStatusMessage('Streaming via Cloudflare Worker proxy.');
+    setStatusMessage(useProxy ? 'Streaming via Cloudflare Proxy.' : 'Streaming directly from source (Your IP).');
 
     setTimeout(() => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }, 100);
+  };
+
+  const handleSwitchStreamSource = (targetMode) => {
+    if (!activeVideo) return;
+    const newSrc = targetMode === 'proxy' ? activeVideo.proxyUrl : activeVideo.directUrl;
+    setActiveVideo(prev => ({
+      ...prev,
+      blobUrl: newSrc,
+      streamMode: targetMode === 'proxy' ? 'Cloudflare Proxy' : 'Direct Browser Stream'
+    }));
+    setStatusMessage(`Switched to ${targetMode === 'proxy' ? 'Cloudflare Proxy' : 'Direct Browser Stream (Your IP)'}.`);
   };
 
   const handleCancelBuffer = () => {
@@ -220,21 +237,19 @@ export default function App() {
 
   const handlePlay = async (video) => {
     try {
-      // Revoke old URL if it exists and is a local blob URL
       if (activeVideo && activeVideo.blobUrl && activeVideo.blobUrl.startsWith('blob:')) {
         URL.revokeObjectURL(activeVideo.blobUrl);
       }
 
-      // Check if Service Worker is active and controlling the page
       if (navigator.serviceWorker && navigator.serviceWorker.controller) {
         setActiveVideo({
           ...video,
-          blobUrl: `/stream-video/${video.id}`
+          blobUrl: `/stream-video/${video.id}`,
+          isStreamingOnly: false
         });
         setStatusMessage('');
       } else {
-        // Fallback for private tabs or when service worker isn't ready
-        setStatusMessage(`Loading ${video.title} from cache (no streaming fallback)...`);
+        setStatusMessage(`Loading ${video.title} from cache...`);
         const blob = await getVideoBlob(video.id);
         
         if (!blob) {
@@ -244,12 +259,12 @@ export default function App() {
         const blobUrl = URL.createObjectURL(blob);
         setActiveVideo({
           ...video,
-          blobUrl
+          blobUrl,
+          isStreamingOnly: false
         });
         setStatusMessage('');
       }
       
-      // Scroll smoothly to player
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       setErrorMessage(err.message);
@@ -327,14 +342,14 @@ export default function App() {
           {/* Input Panel */}
           <div className="glass-panel">
             <h2 className="panel-header">
-              <LinkIcon /> Buffer New Video
+              <LinkIcon /> Buffer / Stream Video
             </h2>
             
             <form onSubmit={handleStartBuffer} className="buffer-form">
               <div className="input-container">
                 <input
                   type="url"
-                  placeholder="Paste direct MP4 video link here (e.g. https://example.com/video.mp4)"
+                  placeholder="Paste direct MP4 video link (e.g. Streamtape, tapecontent, or direct .mp4)"
                   value={videoUrl}
                   onChange={(e) => setVideoUrl(e.target.value)}
                   disabled={isBuffering}
@@ -342,21 +357,33 @@ export default function App() {
                   className="input-field"
                 />
               </div>
-              <div className="form-buttons-row">
+              <div className="form-buttons-row" style={{ flexWrap: 'wrap', gap: '0.6rem' }}>
                 <button
                   type="button"
-                  onClick={handleDirectStream}
+                  onClick={(e) => handleDirectStream(e, false)}
+                  disabled={isBuffering || !videoUrl}
+                  className="btn-primary"
+                  style={{ flex: '1 1 180px' }}
+                  title="Stream directly from your browser IP (bypasses proxy IP-locks on Streamtape/tapecontent)"
+                >
+                  <PlayIcon /> Stream (Your IP)
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => handleDirectStream(e, true)}
                   disabled={isBuffering || !videoUrl}
                   className="btn-secondary"
-                  style={{ flex: 1 }}
+                  style={{ flex: '1 1 180px' }}
+                  title="Stream via Cloudflare Worker proxy"
                 >
-                  <PlayIcon /> Stream Directly
+                  <CloudIcon /> Stream via Proxy
                 </button>
                 <button
                   type="submit"
                   disabled={isBuffering || !videoUrl}
-                  className="btn-primary"
-                  style={{ flex: 1 }}
+                  className="btn-secondary"
+                  style={{ flex: '1 1 180px', borderColor: 'hsl(var(--cyan-400) / 0.4)' }}
+                  title="Download and cache video to IndexedDB for stutter-free offline playback"
                 >
                   {isBuffering ? 'Buffering to Cache...' : 'Buffer for Offline'}
                 </button>
@@ -385,15 +412,26 @@ export default function App() {
                 <svg className="icon-md" style={{ color: '#f87171', marginTop: '0.15rem' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
-                <div className="error-alert-content">
-                  <span className="error-alert-title">Error</span>
+                <div className="error-alert-content" style={{ flex: 1 }}>
+                  <span className="error-alert-title">Connection / Buffering Notice</span>
                   <span className="error-alert-desc">{errorMessage}</span>
-                  <button 
-                    onClick={() => setErrorMessage('')}
-                    className="error-dismiss-btn"
-                  >
-                    Dismiss
-                  </button>
+                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                    {videoUrl && (
+                      <button
+                        onClick={(e) => handleDirectStream(e, false)}
+                        className="btn-primary"
+                        style={{ padding: '0.25rem 0.75rem', fontSize: '0.75rem' }}
+                      >
+                        <PlayIcon /> Try Direct Stream (Your IP)
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => setErrorMessage('')}
+                      className="error-dismiss-btn"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -402,8 +440,7 @@ export default function App() {
             <div className="info-hint-box">
               <InfoIcon />
               <p>
-                <strong>Slow internet support:</strong> The video is downloaded via a local CORS proxy directly to your browser's IndexedDB. 
-                Once buffering starts, your network will download the video at 2mbps. You can track progress below. Once it reaches 100%, you can watch it without any stutter.
+                <strong>Streaming Modes:</strong> If a video link is IP-locked by the host (like Streamtape / Tapecontent), use <strong>Stream (Your IP)</strong> to play directly. Use <strong>Buffer for Offline</strong> on direct MP4 links to cache them into your browser for zero-stutter playback.
               </p>
             </div>
           </div>
@@ -458,6 +495,10 @@ export default function App() {
                   isPlayerPlayingRef.current = playing;
                 }}
                 isStreamingOnly={activeVideo.isStreamingOnly}
+                directUrl={activeVideo.directUrl}
+                proxyUrl={activeVideo.proxyUrl}
+                streamMode={activeVideo.streamMode}
+                onSwitchSource={handleSwitchStreamSource}
               />
             </div>
           ) : (
@@ -469,7 +510,7 @@ export default function App() {
               </div>
               <h3 className="placeholder-title">No Video Active</h3>
               <p className="placeholder-desc">
-                Choose a video from your library list on the right to start watching offline, or paste a URL above to cache it.
+                Choose a video from your library list on the right to start watching offline, or paste a URL above to stream or cache it.
               </p>
             </div>
           )}
@@ -572,7 +613,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="app-footer">
-        QuantumBuffer Player | Local Offline Video Buffering Tool. No server-side file downloads.
+        QuantumBuffer Player | Local Offline Video Buffering Tool.
       </footer>
     </div>
   );

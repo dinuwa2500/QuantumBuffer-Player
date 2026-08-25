@@ -36,7 +36,63 @@ function getSmartReferer(targetUrl, customReferer) {
   }
 }
 
-// Route to get metadata for a video URL (Content-Length, Content-Type, Accept-Ranges)
+// Helper to resolve Streamtape direct download link for the server's IP
+async function resolveStreamtapeDirectUrl(urlOrId, userAgent) {
+  try {
+    let fileId = urlOrId;
+    const match = urlOrId.match(/(?:streamtape\.com\/(?:v|e)\/|radosgw\/)([a-zA-Z0-9_-]+)/i);
+    if (match) {
+      fileId = match[1];
+    } else {
+      return null;
+    }
+
+    const embedUrl = `https://streamtape.com/e/${fileId}/`;
+    const res = await axios.get(embedUrl, {
+      headers: {
+        'User-Agent': userAgent,
+        'Referer': 'https://streamtape.com/',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      timeout: 10000,
+      validateStatus: () => true
+    });
+
+    if (res.status >= 400) return null;
+    const html = res.data;
+
+    const matchLink = html.match(/document\.getElementById\(['"][a-zA-Z0-9_-]*link['"]\)\.innerHTML\s*=\s*(.+?);/i);
+    if (matchLink) {
+      const expr = matchLink[1];
+      const stringParts = [];
+      const strRegex = /['"]([^'"]+)['"]/g;
+      let m;
+      while ((m = strRegex.exec(expr)) !== null) {
+        stringParts.push(m[1]);
+      }
+      if (stringParts.length > 0) {
+        let directUrl = stringParts.join('').trim();
+        if (directUrl.startsWith('//')) directUrl = 'https:' + directUrl;
+        else if (!directUrl.startsWith('http')) directUrl = 'https://' + directUrl;
+        return directUrl;
+      }
+    }
+
+    const tokenMatch = html.match(/['"](\/\/[^'"]*tapecontent\.net\/get_video\?[^'"]+)['"]/i);
+    if (tokenMatch) {
+      let directUrl = tokenMatch[1].trim();
+      if (directUrl.startsWith('//')) directUrl = 'https:' + directUrl;
+      return directUrl;
+    }
+
+    return null;
+  } catch (err) {
+    console.warn('Streamtape auto-resolve error:', err.message);
+    return null;
+  }
+}
+
+// Route to get metadata for a video URL
 app.get('/api/info', async (req, res) => {
   let videoUrl = req.query.url;
   if (!videoUrl) {
@@ -64,24 +120,32 @@ app.get('/api/info', async (req, res) => {
   };
   if (referer) headers['Referer'] = referer;
 
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  if (clientIp) {
+    headers['X-Forwarded-For'] = clientIp;
+    headers['X-Real-IP'] = clientIp;
+  }
+
   try {
-    // Attempt Range GET (bytes=0-0) first as it is widely supported
-    let response;
-    try {
-      response = await axios.get(videoUrl, {
-        headers: { ...headers, 'Range': 'bytes=0-0' },
-        timeout: 12000,
-        maxRedirects: 5,
-        validateStatus: () => true // Allow non-2xx to inspect status
-      });
-    } catch (e) {
-      // Fallback to HEAD if Range GET throws
-      response = await axios.head(videoUrl, {
-        headers,
-        timeout: 10000,
-        maxRedirects: 5,
-        validateStatus: () => true
-      });
+    let activeUrl = videoUrl;
+    let response = await axios.get(activeUrl, {
+      headers: { ...headers, 'Range': 'bytes=0-0' },
+      timeout: 12000,
+      maxRedirects: 5,
+      validateStatus: () => true
+    });
+
+    if (response.status === 403 && (videoUrl.includes('tapecontent.net') || videoUrl.includes('streamtape'))) {
+      const resolved = await resolveStreamtapeDirectUrl(videoUrl, userAgent);
+      if (resolved) {
+        activeUrl = resolved;
+        response = await axios.get(activeUrl, {
+          headers: { ...headers, 'Range': 'bytes=0-0' },
+          timeout: 12000,
+          maxRedirects: 5,
+          validateStatus: () => true
+        });
+      }
     }
 
     const status = response.status;
@@ -90,11 +154,10 @@ app.get('/api/info', async (req, res) => {
     const contentRange = response.headers['content-range'];
     const acceptRanges = response.headers['accept-ranges'];
 
-    // Check for HTTP errors
     if (status >= 400) {
       let errorHint = `Remote video host returned HTTP ${status}.`;
       if (status === 403) {
-        errorHint += ' Access forbidden: The link may be expired, IP-locked, or hotlink-protected.';
+        errorHint += " Access forbidden: Streamtape links are locked to your browser's IP. Use 'Stream (Your IP)' to play directly.";
       } else if (status === 404) {
         errorHint += ' Video file not found at the specified URL.';
       }
@@ -106,7 +169,6 @@ app.get('/api/info', async (req, res) => {
       });
     }
 
-    // Check for non-video HTML or JSON error page
     const isNonMedia = contentType.includes('text/html') || contentType.includes('application/json');
     if (isNonMedia) {
       return res.json({
@@ -133,6 +195,7 @@ app.get('/api/info', async (req, res) => {
       contentLength: totalLength || null,
       contentType: contentType || 'video/mp4',
       acceptRanges: acceptRanges === 'bytes' || !!contentRange || status === 206,
+      resolvedUrl: activeUrl !== videoUrl ? activeUrl : undefined,
       status
     });
   } catch (error) {
@@ -173,11 +236,30 @@ app.get('/api/proxy', async (req, res) => {
       forwardHeaders['Range'] = req.headers.range;
     }
 
-    const response = await fetch(videoUrl, {
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    if (clientIp) {
+      forwardHeaders['X-Forwarded-For'] = clientIp;
+      forwardHeaders['X-Real-IP'] = clientIp;
+    }
+
+    let activeUrl = videoUrl;
+    let response = await fetch(activeUrl, {
       method: 'GET',
       headers: forwardHeaders,
       redirect: 'follow'
     });
+
+    if (response.status === 403 && (videoUrl.includes('tapecontent.net') || videoUrl.includes('streamtape'))) {
+      const resolved = await resolveStreamtapeDirectUrl(videoUrl, userAgent);
+      if (resolved) {
+        activeUrl = resolved;
+        response = await fetch(activeUrl, {
+          method: 'GET',
+          headers: forwardHeaders,
+          redirect: 'follow'
+        });
+      }
+    }
 
     const responseHeaders = {
       'Access-Control-Allow-Origin': '*',
@@ -203,7 +285,6 @@ app.get('/api/proxy', async (req, res) => {
 
     res.writeHead(response.status, responseHeaders);
 
-    // Pipe stream directly
     const reader = response.body.getReader();
     let isClosed = false;
 

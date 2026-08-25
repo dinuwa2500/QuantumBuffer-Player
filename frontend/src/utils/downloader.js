@@ -22,7 +22,7 @@ export function formatETA(seconds) {
 }
 
 /**
- * Buffers a video from a URL through the proxy.
+ * Buffers a video from a URL through proxy or direct browser connection.
  * 
  * @param {string} videoUrl Original MP4 url
  * @param {Object} options Options containing callbacks and abort signal
@@ -33,33 +33,69 @@ export function formatETA(seconds) {
 export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal }) {
   const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
   const encodedUrl = encodeURIComponent(videoUrl);
-  
-  // 1. Fetch metadata first to get Content-Length, Content-Type, and verify access
-  let info;
+  const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
+
+  let info = null;
+  let useDirectDownload = false;
+
+  // 1. First attempt to probe metadata via Proxy
   try {
     const infoRes = await fetch(`${backendBaseUrl}/api/info?url=${encodedUrl}`, { signal });
-    if (!infoRes.ok) {
-      throw new Error(`Proxy server returned HTTP ${infoRes.status} (${infoRes.statusText})`);
+    if (infoRes.ok) {
+      info = await infoRes.json();
     }
-    info = await infoRes.json();
   } catch (err) {
     if (err.name === 'AbortError') throw err;
-    throw new Error(`Could not connect to proxy server: ${err.message}`);
+    console.warn('Proxy metadata probe failed:', err);
   }
 
-  // If backend reported failure (e.g. 403 Forbidden, 404, or non-video error page)
-  if (info && info.success === false) {
-    throw new Error(info.error || 'Video host rejected the request.');
+  // 2. If proxy was blocked by remote host (e.g. 403 IP-lock on Streamtape / Tapecontent), try direct browser probe
+  if (!info || info.success === false) {
+    try {
+      const directRes = await fetch(videoUrl, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+        signal
+      });
+
+      if (directRes.ok || directRes.status === 206) {
+        useDirectDownload = true;
+        const contentRange = directRes.headers.get('content-range');
+        const contentLength = directRes.headers.get('content-length');
+        const contentType = directRes.headers.get('content-type') || 'video/mp4';
+        let total = null;
+        if (contentRange) {
+          const parts = contentRange.split('/');
+          if (parts.length > 1 && parts[1] !== '*') {
+            total = parseInt(parts[1], 10);
+          }
+        }
+        info = {
+          success: true,
+          contentLength: total || (contentLength ? parseInt(contentLength, 10) : null),
+          contentType: contentType,
+          acceptRanges: true
+        };
+      }
+    } catch (directErr) {
+      if (directErr.name === 'AbortError') throw directErr;
+      const proxyErrorMsg = info?.error || 'Video host rejected server connection.';
+      throw new Error(`${proxyErrorMsg} Streamtape / Tapecontent links are IP-locked. Please click 'Stream (Your IP)' to watch immediately.`);
+    }
   }
 
+  if (!info || info.success === false) {
+    throw new Error(info?.error || 'Video host rejected the request.');
+  }
+
+  const downloadEndpoint = useDirectDownload ? videoUrl : proxyUrl;
   const totalBytes = info.contentLength;
   const contentType = info.contentType || 'video/mp4';
   const acceptRanges = info.acceptRanges;
-  const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
 
   // Fallback to single stream if byte ranges or length are not supported
   if (!totalBytes || !acceptRanges) {
-    return downloadSingleStream(proxyUrl, totalBytes, contentType, onProgress, signal);
+    return downloadSingleStream(downloadEndpoint, totalBytes, contentType, onProgress, signal);
   }
 
   // Segmented Parallel Chunk Downloader
@@ -136,7 +172,7 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
           const end = Math.min(start + CHUNK_SIZE - 1, totalBytes - 1);
 
           try {
-            const segmentData = await downloadChunkWithRetry(proxyUrl, start, end, (bytesRead) => {
+            const segmentData = await downloadChunkWithRetry(downloadEndpoint, start, end, (bytesRead) => {
               loadedBytes += bytesRead;
               checkProgress();
             }, signal);

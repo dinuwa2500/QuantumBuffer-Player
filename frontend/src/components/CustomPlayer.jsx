@@ -30,8 +30,23 @@ const RefreshIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
   </svg>
 );
+const SwitchIcon = () => (
+  <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+  </svg>
+);
 
-export default function CustomPlayer({ src, title, onClose, onPlayStateChange, isStreamingOnly }) {
+export default function CustomPlayer({
+  src,
+  title,
+  onClose,
+  onPlayStateChange,
+  isStreamingOnly,
+  directUrl,
+  proxyUrl,
+  streamMode,
+  onSwitchSource
+}) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -118,7 +133,11 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
           message = 'Decode error: The video file is corrupted or formatted with an unsupported codec.';
           break;
         case 4:
-          message = 'Media format not supported or remote server returned an error (e.g. HTTP 403 / expired token).';
+          if (src && src.includes('/api/proxy')) {
+            message = 'Cloudflare proxy received HTTP 403 Forbidden. This video host (Streamtape / Tapecontent) binds links to your browser IP address.';
+          } else {
+            message = 'Media format not supported or remote server returned an error (e.g. HTTP 403 / expired token).';
+          }
           break;
         default:
           message = mediaError.message || 'Media source error occurred.';
@@ -340,6 +359,7 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
   }, [src]);
 
   const percentage = duration ? (currentTime / duration) * 100 : 0;
+  const isProxyActive = src && src.includes('/api/proxy');
 
   return (
     <div 
@@ -365,9 +385,22 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
       {/* Top Header Overlay (Title & Close) */}
       <div className={`player-overlay-top ${showControls || playerError ? 'visible' : ''}`}>
         <div className="player-title-info">
-          <span className={`player-mode-tag ${isStreamingOnly ? 'mode-streaming' : 'mode-offline'}`}>
-            {isStreamingOnly ? 'Cloud Stream' : 'Offline Cached'}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <span className={`player-mode-tag ${isStreamingOnly ? (isProxyActive ? 'mode-proxy' : 'mode-direct') : 'mode-offline'}`}>
+              {isStreamingOnly ? (isProxyActive ? 'Cloudflare Proxy' : 'Direct Browser Stream') : 'Offline Cached'}
+            </span>
+
+            {isStreamingOnly && onSwitchSource && directUrl && proxyUrl && (
+              <button
+                onClick={() => onSwitchSource(isProxyActive ? 'direct' : 'proxy')}
+                className="btn-secondary"
+                style={{ padding: '0.2rem 0.6rem', fontSize: '0.7rem', height: 'auto' }}
+                title={isProxyActive ? 'Switch to Direct Browser stream (uses your IP)' : 'Switch to Cloudflare proxy'}
+              >
+                <SwitchIcon /> Switch to {isProxyActive ? 'Direct Stream' : 'Proxy Stream'}
+              </button>
+            )}
+          </div>
           <h2 className="player-video-title">{title}</h2>
         </div>
         <button 
@@ -384,7 +417,7 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
         <div className="player-error-overlay" style={{
           position: 'absolute',
           inset: 0,
-          background: 'rgba(10, 10, 16, 0.88)',
+          background: 'rgba(10, 10, 16, 0.9)',
           backdropFilter: 'blur(8px)',
           display: 'flex',
           flexDirection: 'column',
@@ -410,14 +443,32 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
             </svg>
           </div>
           <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: '#f87171', marginBottom: '0.5rem' }}>
-            Playback Failed
+            Playback Error
           </h3>
-          <p style={{ maxWidth: '420px', fontSize: '0.875rem', color: 'hsl(var(--text-secondary))', lineHeight: '1.5', marginBottom: '1.5rem' }}>
+          <p style={{ maxWidth: '460px', fontSize: '0.875rem', color: 'hsl(var(--text-secondary))', lineHeight: '1.5', marginBottom: '1.5rem' }}>
             {playerError}
           </p>
-          <div style={{ display: 'flex', gap: '0.75rem' }}>
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+            {isProxyActive && directUrl && onSwitchSource && (
+              <button
+                onClick={() => onSwitchSource('direct')}
+                className="btn-primary"
+                style={{ padding: '0.5rem 1.25rem' }}
+              >
+                <PlayIcon /> Play Direct Stream (Your IP)
+              </button>
+            )}
+            {!isProxyActive && proxyUrl && onSwitchSource && (
+              <button
+                onClick={() => onSwitchSource('proxy')}
+                className="btn-primary"
+                style={{ padding: '0.5rem 1.25rem' }}
+              >
+                <PlayIcon /> Try Cloudflare Proxy Stream
+              </button>
+            )}
             <button onClick={handleRetry} className="btn-secondary" style={{ padding: '0.5rem 1.25rem' }}>
-              <RefreshIcon /> Retry Stream
+              <RefreshIcon /> Retry
             </button>
             <button onClick={onClose} className="btn-danger" style={{ padding: '0.5rem 1.25rem' }}>
               Close Player

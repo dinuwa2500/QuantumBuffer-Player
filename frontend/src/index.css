@@ -804,9 +804,24 @@ h1, h2, h3, h4, h5, h6 {
   font-size: 0.65rem;
   font-weight: 700;
   text-transform: uppercase;
-  color: #22d3ee;
   letter-spacing: 0.05em;
   font-family: monospace;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: fit-content;
+}
+
+.player-mode-tag.mode-direct {
+  color: #34d399;
+}
+
+.player-mode-tag.mode-proxy {
+  color: #38bdf8;
+}
+
+.player-mode-tag.mode-offline {
+  color: #a78bfa;
 }
 
 .player-video-title {

@@ -1,3 +1,62 @@
+// Helper to resolve a fresh stream URL directly from Streamtape for the worker's IP
+async function resolveStreamtapeDirectUrl(urlOrId, userAgent) {
+  try {
+    let fileId = urlOrId;
+    const match = urlOrId.match(/(?:streamtape\.com\/(?:v|e)\/|radosgw\/)([a-zA-Z0-9_-]+)/i);
+    if (match) {
+      fileId = match[1];
+    } else {
+      return null;
+    }
+
+    const embedUrl = `https://streamtape.com/e/${fileId}/`;
+    const res = await fetch(embedUrl, {
+      headers: {
+        'User-Agent': userAgent,
+        'Referer': 'https://streamtape.com/',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    });
+
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    // Look for link pattern: document.getElementById('...link').innerHTML = ...
+    // E.g.: document.getElementById('robotlink').innerHTML = '//' + ('tapecontent.net/get_video?...')
+    const matchLink = html.match(/document\.getElementById\(['"][a-zA-Z0-9_-]*link['"]\)\.innerHTML\s*=\s*(.+?);/i);
+    if (matchLink) {
+      const expr = matchLink[1];
+      // Extract string parts inside quotes
+      const stringParts = [];
+      const strRegex = /['"]([^'"]+)['"]/g;
+      let m;
+      while ((m = strRegex.exec(expr)) !== null) {
+        stringParts.push(m[1]);
+      }
+      if (stringParts.length > 0) {
+        let directUrl = stringParts.join('').trim();
+        if (directUrl.startsWith('//')) directUrl = 'https:' + directUrl;
+        else if (!directUrl.startsWith('http')) directUrl = 'https://' + directUrl;
+        return directUrl;
+      }
+    }
+
+    // Secondary fallback regex for token pattern
+    const tokenMatch = html.match(/['"](\/\/[^'"]*tapecontent\.net\/get_video\?[^'"]+)['"]/i);
+    if (tokenMatch) {
+      let directUrl = tokenMatch[1].trim();
+      if (directUrl.startsWith('//')) directUrl = 'https:' + directUrl;
+      return directUrl;
+    }
+
+    return null;
+  } catch (err) {
+    console.warn('Streamtape auto-resolution error:', err);
+    return null;
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -11,7 +70,7 @@ export default {
       "Access-Control-Max-Age": "86400",
     };
 
-    // 1. Handle CORS preflight request (required for browsers)
+    // 1. Handle CORS preflight request
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
@@ -29,10 +88,9 @@ export default {
       });
     }
 
-    // 3. Extract the target video URL query parameter robustly
+    // 3. Extract target video URL query parameter robustly
     let videoUrl = url.searchParams.get("url");
     if (!videoUrl) {
-      // Fallback: extract everything after ?url= or &url=
       const idx = request.url.indexOf("url=");
       if (idx !== -1) {
         try {
@@ -83,11 +141,17 @@ export default {
     forwardHeaders.set("Accept", "*/*");
     forwardHeaders.set("Accept-Language", "en-US,en;q=0.9");
     forwardHeaders.set("Accept-Encoding", "identity;q=1, *;q=0");
-    if (referer) {
-      forwardHeaders.set("Referer", referer);
-    }
-    if (targetOrigin) {
-      forwardHeaders.set("Origin", targetOrigin);
+    if (referer) forwardHeaders.set("Referer", referer);
+    if (targetOrigin) forwardHeaders.set("Origin", targetOrigin);
+
+    // Forward client IP headers so upstream proxies behind CDNs receive client identity
+    const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || request.headers.get("x-real-ip");
+    if (clientIp) {
+      forwardHeaders.set("X-Forwarded-For", clientIp);
+      forwardHeaders.set("X-Real-IP", clientIp);
+      forwardHeaders.set("CF-Connecting-IP", clientIp);
+      forwardHeaders.set("True-Client-IP", clientIp);
+      forwardHeaders.set("Client-IP", clientIp);
     }
 
     try {
@@ -95,8 +159,8 @@ export default {
       // Endpoint A: Fetch Metadata (/api/info)
       // -------------------------------------------------------------
       if (url.pathname === "/api/info" || url.pathname.startsWith("/api/info")) {
-        // First try Range GET (bytes=0-0) which is widely supported by CDNs and storage clusters
-        let response = await fetch(videoUrl, {
+        let activeFetchUrl = videoUrl;
+        let response = await fetch(activeFetchUrl, {
           method: "GET",
           headers: {
             ...Object.fromEntries(forwardHeaders),
@@ -105,9 +169,25 @@ export default {
           redirect: "follow"
         });
 
-        // If Range request failed (e.g. 405 Method Not Allowed or 501), fallback to HEAD
+        // If 403 Forbidden on Streamtape / Tapecontent, attempt auto-resolving a fresh server-signed ticket
+        if (response.status === 403 && (targetHost.includes("tapecontent.net") || targetHost.includes("streamtape"))) {
+          const resolvedUrl = await resolveStreamtapeDirectUrl(videoUrl, defaultUserAgent);
+          if (resolvedUrl) {
+            activeFetchUrl = resolvedUrl;
+            response = await fetch(activeFetchUrl, {
+              method: "GET",
+              headers: {
+                ...Object.fromEntries(forwardHeaders),
+                "Range": "bytes=0-0"
+              },
+              redirect: "follow"
+            });
+          }
+        }
+
+        // If Range request failed, fallback to HEAD
         if (!response.ok && response.status !== 206) {
-          response = await fetch(videoUrl, {
+          response = await fetch(activeFetchUrl, {
             method: "HEAD",
             headers: forwardHeaders,
             redirect: "follow"
@@ -124,7 +204,7 @@ export default {
         if (status >= 400) {
           let errorHint = `Remote video host returned HTTP ${status} (${response.statusText || 'Error'}).`;
           if (status === 403) {
-            errorHint += " Access forbidden: The link may be expired, IP-locked, or hotlink-protected.";
+            errorHint += " Access forbidden: Streamtape links are locked to your browser's IP. Use 'Stream (Your IP)' to watch directly.";
           } else if (status === 404) {
             errorHint += " Video file not found at the specified URL.";
           }
@@ -169,6 +249,7 @@ export default {
           contentLength: totalLength || null,
           contentType: contentType || "video/mp4",
           acceptRanges: acceptRanges === "bytes" || !!contentRange || status === 206,
+          resolvedUrl: activeFetchUrl !== videoUrl ? activeFetchUrl : undefined,
           status: status
         }), {
           headers: {
@@ -186,11 +267,25 @@ export default {
         forwardHeaders.set("Range", clientRange);
       }
 
-      const videoResponse = await fetch(videoUrl, {
+      let activeStreamUrl = videoUrl;
+      let videoResponse = await fetch(activeStreamUrl, {
         method: request.method === "HEAD" ? "HEAD" : "GET",
         headers: forwardHeaders,
         redirect: "follow"
       });
+
+      // Auto-resolve Streamtape link if 403 Forbidden received due to IP-lock
+      if (videoResponse.status === 403 && (targetHost.includes("tapecontent.net") || targetHost.includes("streamtape"))) {
+        const resolvedUrl = await resolveStreamtapeDirectUrl(videoUrl, defaultUserAgent);
+        if (resolvedUrl) {
+          activeStreamUrl = resolvedUrl;
+          videoResponse = await fetch(activeStreamUrl, {
+            method: request.method === "HEAD" ? "HEAD" : "GET",
+            headers: forwardHeaders,
+            redirect: "follow"
+          });
+        }
+      }
 
       // Prepare response headers for browser CORS and streaming
       const responseHeaders = new Headers();
@@ -215,12 +310,12 @@ export default {
         }
       }
 
-      // Ensure Accept-Ranges is exposed if target supports Range
+      // Ensure Accept-Ranges is exposed
       if (!responseHeaders.has("accept-ranges") && (videoResponse.status === 206 || responseHeaders.has("content-range"))) {
         responseHeaders.set("accept-ranges", "bytes");
       }
 
-      // Stream the response directly (memory-efficient)
+      // Stream the response directly
       return new Response(videoResponse.body, {
         status: videoResponse.status,
         statusText: videoResponse.statusText,
