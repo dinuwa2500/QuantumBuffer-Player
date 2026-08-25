@@ -22,29 +22,34 @@ export function formatETA(seconds) {
 }
 
 /**
- * Buffers a video from a URL through the local proxy.
+ * Buffers a video from a URL through the proxy.
  * 
  * @param {string} videoUrl Original MP4 url
  * @param {Object} options Options containing callbacks and abort signal
  * @param {Function} options.onProgress Callback for progress: (data) => {}
+ * @param {Function} options.checkThrottle Callback to check if download should throttle for player
  * @param {AbortSignal} options.signal AbortController signal for cancellation
  */
 export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal }) {
   const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
   const encodedUrl = encodeURIComponent(videoUrl);
   
-  // 1. Fetch metadata first to get Content-Length and Content-Type
+  // 1. Fetch metadata first to get Content-Length, Content-Type, and verify access
   let info;
   try {
     const infoRes = await fetch(`${backendBaseUrl}/api/info?url=${encodedUrl}`, { signal });
     if (!infoRes.ok) {
-      throw new Error(`Failed to fetch video info: ${infoRes.statusText}`);
+      throw new Error(`Proxy server returned HTTP ${infoRes.status} (${infoRes.statusText})`);
     }
     info = await infoRes.json();
   } catch (err) {
     if (err.name === 'AbortError') throw err;
-    console.warn('Could not retrieve metadata, falling back to streaming defaults.', err);
-    info = { contentLength: null, contentType: 'video/mp4', acceptRanges: false };
+    throw new Error(`Could not connect to proxy server: ${err.message}`);
+  }
+
+  // If backend reported failure (e.g. 403 Forbidden, 404, or non-video error page)
+  if (info && info.success === false) {
+    throw new Error(info.error || 'Video host rejected the request.');
   }
 
   const totalBytes = info.contentLength;
@@ -52,7 +57,7 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
   const acceptRanges = info.acceptRanges;
   const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
 
-  // Fallback to single stream if metadata/ranges are not supported
+  // Fallback to single stream if byte ranges or length are not supported
   if (!totalBytes || !acceptRanges) {
     return downloadSingleStream(proxyUrl, totalBytes, contentType, onProgress, signal);
   }
@@ -114,12 +119,10 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
         const maxConcurrency = isThrottled ? 2 : CONCURRENCY;
 
         if (activeDownloads >= maxConcurrency) {
-          // Wait a small bit and check again
           await new Promise(r => setTimeout(r, 100));
           continue;
         }
 
-        // If throttled, add a delay between chunk requests to give the player priority
         if (isThrottled && activeDownloads > 0) {
           await new Promise(r => setTimeout(r, 100));
           continue;
@@ -128,7 +131,6 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
         const index = nextChunkIndex++;
         activeDownloads++;
 
-        // Run download in an IIFE to allow other parallel loops
         (async () => {
           const start = index * CHUNK_SIZE;
           const end = Math.min(start + CHUNK_SIZE - 1, totalBytes - 1);
@@ -160,7 +162,6 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
       }
     };
 
-    // Kick off the loop
     downloadLoop();
 
     if (signal) {
@@ -183,7 +184,7 @@ async function downloadChunkWithRetry(url, start, end, onProgress, signal, retri
         signal
       });
 
-      if (!response.ok) {
+      if (!response.ok && response.status !== 206) {
         throw new Error(`HTTP ${response.status} ${response.statusText}`);
       }
 
@@ -219,12 +220,12 @@ async function downloadChunkWithRetry(url, start, end, onProgress, signal, retri
 }
 
 /**
- * Graceful fallback to single continuous stream download
+ * Fallback to single continuous stream download
  */
 async function downloadSingleStream(url, totalBytes, contentType, onProgress, signal) {
   const response = await fetch(url, { signal });
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.statusText}`);
+  if (!response.ok && response.status !== 206) {
+    throw new Error(`Request failed with HTTP ${response.status} (${response.statusText})`);
   }
   if (!response.body) {
     throw new Error('Response body is empty or not readable.');

@@ -25,6 +25,11 @@ const PipIcon = () => (
 const CloseIcon = () => (
   <svg className="icon-md fill-current" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
 );
+const RefreshIcon = () => (
+  <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+  </svg>
+);
 
 export default function CustomPlayer({ src, title, onClose, onPlayStateChange, isStreamingOnly }) {
   const videoRef = useRef(null);
@@ -38,6 +43,7 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [playerError, setPlayerError] = useState(null);
 
   // Sync play state to parent
   useEffect(() => {
@@ -52,6 +58,7 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
   const wasPlayingRef = useRef(false);
 
   useEffect(() => {
+    setPlayerError(null);
     if (prevSrcRef.current !== src) {
       if (videoRef.current && prevSrcRef.current) {
         timeToRestoreRef.current = videoRef.current.currentTime;
@@ -79,15 +86,64 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
   // Toggle Play / Pause
   const togglePlay = () => {
     if (!videoRef.current) return;
+    if (playerError) {
+      handleRetry();
+      return;
+    }
     if (isPlaying) {
       videoRef.current.pause();
     } else {
-      videoRef.current.play().catch(err => console.log('Playback failed:', err));
+      videoRef.current.play().catch(err => {
+        console.warn('Playback failed:', err);
+        if (err.name === 'NotSupportedError' || err.name === 'DOMException') {
+          setPlayerError('Media resource not suitable or stream blocked by remote host (HTTP 403 / Expired link).');
+        }
+      });
+    }
+  };
+
+  // Handle Video Error Event
+  const handleVideoError = (e) => {
+    const mediaError = videoRef.current ? videoRef.current.error : null;
+    let message = 'Unable to play video resource.';
+    if (mediaError) {
+      switch (mediaError.code) {
+        case 1:
+          message = 'Video playback was aborted.';
+          break;
+        case 2:
+          message = 'Network error: The video download was interrupted or blocked by the server.';
+          break;
+        case 3:
+          message = 'Decode error: The video file is corrupted or formatted with an unsupported codec.';
+          break;
+        case 4:
+          message = 'Media format not supported or remote server returned an error (e.g. HTTP 403 / expired token).';
+          break;
+        default:
+          message = mediaError.message || 'Media source error occurred.';
+      }
+    }
+    console.error('HTML5 Video Error:', mediaError, message);
+    setPlayerError(message);
+    setIsPlaying(false);
+  };
+
+  const handleRetry = () => {
+    setPlayerError(null);
+    if (videoRef.current) {
+      videoRef.current.load();
+      videoRef.current.play().catch(err => {
+        console.warn('Retry play failed:', err);
+      });
     }
   };
 
   // Handle Video Events
-  const handlePlay = () => setIsPlaying(true);
+  const handlePlay = () => {
+    setIsPlaying(true);
+    setPlayerError(null);
+  };
   const handlePause = () => setIsPlaying(false);
   const handleTimeUpdate = () => {
     if (videoRef.current) {
@@ -97,6 +153,7 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
       setDuration(videoRef.current.duration);
+      setPlayerError(null);
       if (timeToRestoreRef.current !== null) {
         videoRef.current.currentTime = timeToRestoreRef.current;
         timeToRestoreRef.current = null;
@@ -212,7 +269,6 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
   // Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Don't intercept typing in inputs
       if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') {
         return;
       }
@@ -272,7 +328,7 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isPlaying, volume, isMuted, duration]);
+  }, [isPlaying, volume, isMuted, duration, playerError]);
 
   // Sync volume on video src change
   useEffect(() => {
@@ -302,10 +358,12 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
         onPause={handlePause}
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={handleLoadedMetadata}
+        onError={handleVideoError}
+        playsInline
       />
 
       {/* Top Header Overlay (Title & Close) */}
-      <div className={`player-overlay-top ${showControls ? 'visible' : ''}`}>
+      <div className={`player-overlay-top ${showControls || playerError ? 'visible' : ''}`}>
         <div className="player-title-info">
           <span className={`player-mode-tag ${isStreamingOnly ? 'mode-streaming' : 'mode-offline'}`}>
             {isStreamingOnly ? 'Cloud Stream' : 'Offline Cached'}
@@ -321,8 +379,55 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
         </button>
       </div>
 
+      {/* Player Error Overlay */}
+      {playerError && (
+        <div className="player-error-overlay" style={{
+          position: 'absolute',
+          inset: 0,
+          background: 'rgba(10, 10, 16, 0.88)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '2rem',
+          textAlign: 'center',
+          zIndex: 40
+        }}>
+          <div style={{
+            width: '3.5rem',
+            height: '3.5rem',
+            borderRadius: '50%',
+            background: 'rgba(239, 68, 68, 0.15)',
+            border: '1px solid rgba(239, 68, 68, 0.3)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            marginBottom: '1rem'
+          }}>
+            <svg className="icon-lg" style={{ color: '#ef4444' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: '#f87171', marginBottom: '0.5rem' }}>
+            Playback Failed
+          </h3>
+          <p style={{ maxWidth: '420px', fontSize: '0.875rem', color: 'hsl(var(--text-secondary))', lineHeight: '1.5', marginBottom: '1.5rem' }}>
+            {playerError}
+          </p>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button onClick={handleRetry} className="btn-secondary" style={{ padding: '0.5rem 1.25rem' }}>
+              <RefreshIcon /> Retry Stream
+            </button>
+            <button onClick={onClose} className="btn-danger" style={{ padding: '0.5rem 1.25rem' }}>
+              Close Player
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Center Big Play Button on Pause */}
-      {!isPlaying && (
+      {!isPlaying && !playerError && (
         <div className="center-play-button-overlay">
           <button 
             onClick={togglePlay}
@@ -337,7 +442,7 @@ export default function CustomPlayer({ src, title, onClose, onPlayStateChange, i
       )}
 
       {/* Bottom Controls Overlay */}
-      <div className={`player-overlay-bottom ${showControls ? 'visible' : ''}`}>
+      <div className={`player-overlay-bottom ${showControls && !playerError ? 'visible' : ''}`}>
         {/* Progress Bar Container */}
         <div className="seekbar-container">
           <input

@@ -65,7 +65,7 @@ async function handleVideoStreamRequest(id, request) {
     ]);
 
     if (!blob) {
-      return new Response('Video not found', { status: 404 });
+      return new Response('Video not found in local cache', { status: 404 });
     }
 
     const contentType = metadata ? metadata.contentType : (blob.type || 'video/mp4');
@@ -77,20 +77,33 @@ async function handleVideoStreamRequest(id, request) {
         status: 200,
         headers: {
           'Content-Type': contentType,
-          'Content-Length': totalSize,
+          'Content-Length': totalSize.toString(),
           'Accept-Ranges': 'bytes'
         }
       });
     }
 
-    const parts = rangeHeader.replace(/bytes=/, "").split("-");
-    const startStr = parts[0];
-    const endStr = parts[1];
+    let start = 0;
+    let end = totalSize - 1;
 
-    const start = parseInt(startStr, 10);
-    const end = endStr ? parseInt(endStr, 10) : totalSize - 1;
+    const match = rangeHeader.match(/bytes=(\d*)-(\d*)/);
+    if (match) {
+      if (match[1] === "" && match[2] !== "") {
+        // Suffix range (e.g. bytes=-500)
+        const suffixLength = parseInt(match[2], 10);
+        start = Math.max(0, totalSize - suffixLength);
+        end = totalSize - 1;
+      } else {
+        if (match[1] !== "") {
+          start = parseInt(match[1], 10);
+        }
+        if (match[2] !== "") {
+          end = Math.min(parseInt(match[2], 10), totalSize - 1);
+        }
+      }
+    }
 
-    if (start >= totalSize || end >= totalSize) {
+    if (isNaN(start) || isNaN(end) || start > end || start >= totalSize) {
       return new Response('Range Not Satisfiable', {
         status: 416,
         headers: {
@@ -106,7 +119,7 @@ async function handleVideoStreamRequest(id, request) {
       headers: {
         'Content-Range': `bytes ${start}-${end}/${totalSize}`,
         'Accept-Ranges': 'bytes',
-        'Content-Length': chunk.size,
+        'Content-Length': chunk.size.toString(),
         'Content-Type': contentType
       }
     });
