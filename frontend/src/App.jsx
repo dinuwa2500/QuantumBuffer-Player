@@ -60,6 +60,15 @@ export default function App() {
   const [customOrigin, setCustomOrigin] = useState('');
   const [showAdvancedHeaders, setShowAdvancedHeaders] = useState(true);
   
+  const defaultBackend = (import.meta.env.VITE_BACKEND_URL || 'https://quantum-buffer-player.vercel.app').replace(/\/+$/, '');
+  const [proxyBackendUrl, setProxyBackendUrl] = useState(() => {
+    return (localStorage.getItem('qb_proxy_backend_url') || defaultBackend).replace(/\/+$/, '');
+  });
+
+  const getBackendBaseUrl = () => {
+    return (proxyBackendUrl || defaultBackend).replace(/\/+$/, '');
+  };
+  
   const abortControllerRef = useRef(null);
   const isPlayerPlayingRef = useRef(false);
   const activeVideoRef = useRef(null);
@@ -139,8 +148,7 @@ export default function App() {
     setCustomOrigin(newOrigin);
     if (!activeVideo || !activeVideo.directUrl) return;
 
-    const rawBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-    const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+    const backendBaseUrl = getBackendBaseUrl();
     let newProxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(activeVideo.directUrl)}`;
     if (newReferer && newReferer.trim()) {
       newProxyUrl += `&referer=${encodeURIComponent(newReferer.trim())}`;
@@ -226,8 +234,7 @@ export default function App() {
 
     const title = getTitleFromUrl(cleanUrl);
     const id = 'vid_' + Date.now();
-    const rawBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-    const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+    const backendBaseUrl = getBackendBaseUrl();
     let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
     if (customReferer && customReferer.trim()) {
       proxyUrl += `&referer=${encodeURIComponent(customReferer.trim())}`;
@@ -330,8 +337,7 @@ export default function App() {
 
     const title = getTitleFromUrl(cleanUrl);
     const id = 'stream_' + Date.now();
-    const rawBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-    const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+    const backendBaseUrl = getBackendBaseUrl();
     let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
     if (customReferer && customReferer.trim()) {
       proxyUrl += `&referer=${encodeURIComponent(customReferer.trim())}`;
@@ -690,6 +696,41 @@ export default function App() {
                     <span style={{ color: customReferer || customOrigin ? '#22d3ee' : 'inherit' }}>
                       Active: {customReferer || '(none)'}
                     </span>
+                  </div>
+
+                  {/* Backend Proxy Endpoint Switcher */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.6rem', flexWrap: 'wrap', gap: '0.4rem', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '0.45rem' }}>
+                    <span style={{ fontSize: '0.68rem', color: 'hsl(var(--text-secondary))' }}>
+                      Proxy Host: <strong style={{ color: proxyBackendUrl.includes('localhost') ? '#a7f3d0' : '#22d3ee' }}>{proxyBackendUrl}</strong>
+                    </span>
+                    <div style={{ display: 'flex', gap: '0.3rem' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProxyBackendUrl(defaultBackend);
+                          localStorage.setItem('qb_proxy_backend_url', defaultBackend);
+                          setStatusMessage(`Proxy switched to Cloud Vercel: ${defaultBackend}`);
+                        }}
+                        className="btn-secondary"
+                        style={{ padding: '0.15rem 0.45rem', fontSize: '0.65rem', borderColor: proxyBackendUrl === defaultBackend ? '#22d3ee' : undefined }}
+                      >
+                        Cloud (Vercel)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const localUrl = 'http://localhost:5000';
+                          setProxyBackendUrl(localUrl);
+                          localStorage.setItem('qb_proxy_backend_url', localUrl);
+                          setStatusMessage('Proxy switched to Localhost (http://localhost:5000)');
+                        }}
+                        className="btn-secondary"
+                        style={{ padding: '0.15rem 0.45rem', fontSize: '0.65rem', borderColor: proxyBackendUrl.includes('localhost') ? '#a7f3d0' : undefined }}
+                        title="Bypass Cloudflare datacenter blocks using your local computer residential IP"
+                      >
+                        Localhost:5000 (Your IP)
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}

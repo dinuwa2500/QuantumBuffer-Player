@@ -150,7 +150,7 @@ export function classifyVideoUrl(url) {
  */
 export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal, referer, origin } = {}) {
   const cleanUrl = preprocessVideoUrl(videoUrl);
-  const rawBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+  const rawBaseUrl = (typeof window !== 'undefined' && localStorage.getItem('qb_proxy_backend_url')) || import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
   const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
   const encodedUrl = encodeURIComponent(cleanUrl);
   

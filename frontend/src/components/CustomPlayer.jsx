@@ -160,6 +160,13 @@ export default function CustomPlayer({
                 onSwitchSource('proxy');
                 return;
               }
+              if (data.details === 'manifestParsingError') {
+                setPlayerError(
+                  'Manifest parsing failed: The upstream server returned an HTML error or Cloudflare challenge page instead of an M3U8 video playlist. Video host may be challenging cloud proxy IPs. Customize the Referer / Origin below, or switch to the Localhost proxy.'
+                );
+                hls.destroy();
+                return;
+              }
               // Prevent infinite reload loop on 403 / CORS
               if (!hls.retryCount) hls.retryCount = 0;
               hls.retryCount++;

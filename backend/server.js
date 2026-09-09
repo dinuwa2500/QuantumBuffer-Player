@@ -208,16 +208,16 @@ app.get('/api/info', async (req, res) => {
   const headers = {
     'User-Agent': userAgent,
     'Accept': '*/*',
-    'Accept-Encoding': 'identity;q=1, *;q=0'
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Sec-Ch-Ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'cross-site'
   };
   if (referer) headers['Referer'] = referer;
   if (targetOrigin) headers['Origin'] = targetOrigin;
-
-  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  if (clientIp) {
-    headers['X-Forwarded-For'] = clientIp;
-    headers['X-Real-IP'] = clientIp;
-  }
 
   try {
     let activeUrl = videoUrl;
@@ -491,18 +491,17 @@ app.get('/api/proxy', async (req, res) => {
       'User-Agent': userAgent,
       'Accept': '*/*',
       'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'identity;q=1, *;q=0'
+      'Sec-Ch-Ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"Windows"',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'cross-site'
     };
     if (referer) forwardHeaders['Referer'] = referer;
     if (targetOrigin) forwardHeaders['Origin'] = targetOrigin;
     if (req.headers.range) {
       forwardHeaders['Range'] = req.headers.range;
-    }
-
-    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    if (clientIp) {
-      forwardHeaders['X-Forwarded-For'] = clientIp;
-      forwardHeaders['X-Real-IP'] = clientIp;
     }
 
     let activeUrl = videoUrl;
