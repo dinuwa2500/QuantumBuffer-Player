@@ -183,7 +183,8 @@ export default function App() {
 
     const title = getTitleFromUrl(cleanUrl);
     const id = 'vid_' + Date.now();
-    const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const rawBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
     let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
     if (customReferer && customReferer.trim()) {
       proxyUrl += `&referer=${encodeURIComponent(customReferer.trim())}`;
@@ -283,7 +284,8 @@ export default function App() {
 
     const title = getTitleFromUrl(cleanUrl);
     const id = 'stream_' + Date.now();
-    const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const rawBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
     let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
     if (customReferer && customReferer.trim()) {
       proxyUrl += `&referer=${encodeURIComponent(customReferer.trim())}`;

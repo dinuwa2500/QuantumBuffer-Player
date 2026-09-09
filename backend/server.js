@@ -13,6 +13,14 @@ app.use(cors({
   exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges', 'Content-Type', 'Content-Disposition']
 }));
 
+// Normalize consecutive slashes (e.g. //api/proxy -> /api/proxy)
+app.use((req, res, next) => {
+  if (req.url.startsWith('//')) {
+    req.url = req.url.replace(/^\/+/, '/');
+  }
+  next();
+});
+
 // Root route / health check
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'QuantumBuffer CORS Proxy Server is running' });
@@ -478,6 +486,21 @@ app.get('/api/proxy', async (req, res) => {
     // =========================================================================
     if (isPlaylist) {
       const playlistText = await response.text();
+      const trimmed = playlistText.trim();
+      const isHtml = trimmed.startsWith('<!DOCTYPE') ||
+                     trimmed.startsWith('<html') ||
+                     trimmed.includes('Attention Required! | Cloudflare') ||
+                     trimmed.includes('cf-wrapper');
+
+      if (isHtml || (!trimmed.startsWith('#EXTM3U') && !trimmed.includes('#EXT'))) {
+        let errorMsg = `Remote host (${new URL(activeUrl).hostname}) returned non-playlist HTML.`;
+        if (trimmed.includes('Cloudflare') || trimmed.includes('Attention Required')) {
+          errorMsg = `Remote host (${new URL(activeUrl).hostname}) blocked the proxy server with Cloudflare protection. Click 'Play Direct Stream (Your IP)' below to stream directly.`;
+        }
+        res.writeHead(403, { ...responseHeaders, 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: false, error: errorMsg, isCloudflareBlock: true }));
+      }
+
       const proxyEndpoint = '/api/proxy';
 
       const rewritten = rewriteM3u8Playlist(playlistText, activeUrl, proxyEndpoint, {
