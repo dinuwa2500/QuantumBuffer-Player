@@ -493,6 +493,23 @@ export default {
       // =============================================================
       if (isPlaylist) {
         const playlistText = await videoResponse.text();
+        const trimmed = playlistText.trim();
+        const isHtml = trimmed.startsWith("<!DOCTYPE") ||
+                       trimmed.startsWith("<html") ||
+                       trimmed.includes("Attention Required! | Cloudflare") ||
+                       trimmed.includes("cf-wrapper");
+
+        if (isHtml || (!trimmed.startsWith("#EXTM3U") && !trimmed.includes("#EXT"))) {
+          let errorMsg = `Remote host (${new URL(activeStreamUrl).hostname}) returned non-playlist HTML response.`;
+          if (trimmed.includes("Cloudflare") || trimmed.includes("Attention Required")) {
+            errorMsg = `Remote host (${new URL(activeStreamUrl).hostname}) blocked the proxy server with Cloudflare protection. Click 'Play Direct Stream (Your IP)' below to stream directly without proxy.`;
+          }
+          return new Response(JSON.stringify({ success: false, error: errorMsg, isCloudflareBlock: true }), {
+            status: 403,
+            headers: { "Content-Type": "application/json", ...corsHeaders }
+          });
+        }
+
         const rewritten = rewriteM3u8Playlist(playlistText, activeStreamUrl, url.pathname, {
           referer,
           origin: finalOrigin
