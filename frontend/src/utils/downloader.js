@@ -76,18 +76,6 @@ export function classifyVideoUrl(url) {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();
 
-    const cleanPath = parsed.pathname.toLowerCase();
-    if (cleanPath.endsWith('.m3u8') || parsed.search.toLowerCase().includes('.m3u8')) {
-      return {
-        type: 'hls',
-        host,
-        label: 'Protected HLS Stream (.m3u8)',
-        isHls: true,
-        isProtected: true,
-        hint: 'Adaptive HTTP Live Streaming feed. Use "Play via Proxy" for hotlink bypass.'
-      };
-    }
-
     if (host.includes('sharepoint.com') || host.includes('1drv.ms') || host.includes('onedrive.live.com')) {
       return {
         type: 'sharepoint',
@@ -145,36 +133,20 @@ export function classifyVideoUrl(url) {
  * @param {Function} options.onProgress Callback for progress: (data) => {}
  * @param {Function} options.checkThrottle Callback to check if download should throttle for player
  * @param {AbortSignal} options.signal AbortController signal for cancellation
- * @param {string} [options.referer] Custom Referer header
- * @param {string} [options.origin] Custom Origin header
  */
-export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal, referer, origin } = {}) {
+export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal }) {
   const cleanUrl = preprocessVideoUrl(videoUrl);
-  const rawBaseUrl = (typeof window !== 'undefined' && localStorage.getItem('qb_proxy_backend_url')) || import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-  const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+  const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
   const encodedUrl = encodeURIComponent(cleanUrl);
-  
-  let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
-  if (referer && referer.trim()) proxyUrl += `&referer=${encodeURIComponent(referer.trim())}`;
-  if (origin && origin.trim()) proxyUrl += `&origin=${encodeURIComponent(origin.trim())}`;
+  const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
 
   const hostClassification = classifyVideoUrl(cleanUrl);
-
-  if (hostClassification.isHls) {
-    throw new Error(
-      'HLS (.m3u8) feeds are dynamic multi-segment streams and cannot be cached into a single offline file. Click "Stream via Proxy" to play immediately!'
-    );
-  }
-
   let info = null;
   let useDirectDownload = false;
 
   // 1. First attempt to probe metadata via Proxy
   try {
-    let probeUrl = `${backendBaseUrl}/api/info?url=${encodedUrl}`;
-    if (referer && referer.trim()) probeUrl += `&referer=${encodeURIComponent(referer.trim())}`;
-    if (origin && origin.trim()) probeUrl += `&origin=${encodeURIComponent(origin.trim())}`;
-    const infoRes = await fetch(probeUrl, { signal });
+    const infoRes = await fetch(`${backendBaseUrl}/api/info?url=${encodedUrl}`, { signal });
     if (infoRes.ok) {
       info = await infoRes.json();
     }

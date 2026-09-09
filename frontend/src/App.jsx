@@ -56,18 +56,6 @@ export default function App() {
   const [library, setLibrary] = useState([]);
   const [activeVideo, setActiveVideo] = useState(null);
   const [showGuideModal, setShowGuideModal] = useState(false);
-  const [customReferer, setCustomReferer] = useState('');
-  const [customOrigin, setCustomOrigin] = useState('');
-  const [showAdvancedHeaders, setShowAdvancedHeaders] = useState(true);
-  
-  const defaultBackend = (import.meta.env.VITE_BACKEND_URL || 'https://quantum-buffer-player.vercel.app').replace(/\/+$/, '');
-  const [proxyBackendUrl, setProxyBackendUrl] = useState(() => {
-    return (localStorage.getItem('qb_proxy_backend_url') || defaultBackend).replace(/\/+$/, '');
-  });
-
-  const getBackendBaseUrl = () => {
-    return (proxyBackendUrl || defaultBackend).replace(/\/+$/, '');
-  };
   
   const abortControllerRef = useRef(null);
   const isPlayerPlayingRef = useRef(false);
@@ -126,48 +114,6 @@ export default function App() {
     }
   };
 
-  // Auto-detect and sync Referer/Origin only if not manually customized by the user
-  const handleUrlInputChange = (val) => {
-    setVideoUrl(val);
-    if (!val || !val.trim()) return;
-    try {
-      const parsed = new URL(val.trim());
-      // Only auto-fill if the user has not entered a custom referer or origin
-      if (!customReferer) {
-        setCustomReferer(`${parsed.origin}/`);
-      }
-      if (!customOrigin) {
-        setCustomOrigin(parsed.origin);
-      }
-    } catch (e) {}
-  };
-
-  // Sync headers updated from inside the CustomPlayer error overlay
-  const handleUpdateHeadersFromPlayer = (newReferer, newOrigin) => {
-    setCustomReferer(newReferer);
-    setCustomOrigin(newOrigin);
-    if (!activeVideo || !activeVideo.directUrl) return;
-
-    const backendBaseUrl = getBackendBaseUrl();
-    let newProxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(activeVideo.directUrl)}`;
-    if (newReferer && newReferer.trim()) {
-      newProxyUrl += `&referer=${encodeURIComponent(newReferer.trim())}`;
-    }
-    if (newOrigin && newOrigin.trim()) {
-      newProxyUrl += `&origin=${encodeURIComponent(newOrigin.trim())}`;
-    }
-
-    const isUsingProxy = activeVideo.blobUrl && activeVideo.blobUrl.includes('/api/proxy');
-    setActiveVideo(prev => ({
-      ...prev,
-      proxyUrl: newProxyUrl,
-      blobUrl: isUsingProxy ? newProxyUrl : prev.blobUrl,
-      referer: newReferer.trim(),
-      origin: newOrigin.trim()
-    }));
-    setStatusMessage(`Applied updated headers: Referer=${newReferer || '(none)'}`);
-  };
-
   // Handle local video file import (e.g. downloaded SLIIT SharePoint recording)
   const handleImportLocalFile = async (e) => {
     const file = e.target.files?.[0];
@@ -215,14 +161,6 @@ export default function App() {
     const cleanUrl = preprocessVideoUrl(videoUrl);
     const classification = classifyVideoUrl(cleanUrl);
 
-    // If an HLS stream is detected, buffer mode is not applicable (it is a segmented live stream).
-    // Automatically transition to instant proxy stream mode!
-    if (classification.isHls || cleanUrl.toLowerCase().includes('.m3u8')) {
-      setStatusMessage('HLS stream detected! Initiating instant proxy stream playback...');
-      handleDirectStream(null, true);
-      return;
-    }
-
     // Reset states
     setIsBuffering(true);
     setErrorMessage('');
@@ -234,14 +172,8 @@ export default function App() {
 
     const title = getTitleFromUrl(cleanUrl);
     const id = 'vid_' + Date.now();
-    const backendBaseUrl = getBackendBaseUrl();
-    let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
-    if (customReferer && customReferer.trim()) {
-      proxyUrl += `&referer=${encodeURIComponent(customReferer.trim())}`;
-    }
-    if (customOrigin && customOrigin.trim()) {
-      proxyUrl += `&origin=${encodeURIComponent(customOrigin.trim())}`;
-    }
+    const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
 
     // Play direct or proxy stream immediately while caching
     setActiveVideo({
@@ -257,8 +189,6 @@ export default function App() {
       setStatusMessage('Buffering stream to browser cache...');
       
       const result = await bufferVideo(cleanUrl, {
-        referer: customReferer,
-        origin: customOrigin,
         onProgress: (progressData) => {
           setProgress(progressData);
         },
@@ -326,28 +256,14 @@ export default function App() {
     if (!videoUrl.trim()) return;
 
     const cleanUrl = preprocessVideoUrl(videoUrl);
-    const classification = classifyVideoUrl(cleanUrl);
-    const isHls = cleanUrl.toLowerCase().includes('.m3u8') || classification.isHls;
     setErrorMessage('');
-    setStatusMessage(
-      useProxy
-        ? (isHls ? 'Connecting HLS stream via Reverse Proxy...' : 'Loading stream via Proxy...')
-        : 'Loading direct browser stream (Your IP)...'
-    );
+    setStatusMessage(useProxy ? 'Loading stream via Cloudflare Worker...' : 'Loading direct browser stream (Your IP)...');
 
     const title = getTitleFromUrl(cleanUrl);
     const id = 'stream_' + Date.now();
-    const backendBaseUrl = getBackendBaseUrl();
-    let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
-    if (customReferer && customReferer.trim()) {
-      proxyUrl += `&referer=${encodeURIComponent(customReferer.trim())}`;
-    }
-    if (customOrigin && customOrigin.trim()) {
-      proxyUrl += `&origin=${encodeURIComponent(customOrigin.trim())}`;
-    }
-    // If stream is HLS (.m3u8) or user entered custom headers, it must route through Reverse Proxy to spoof headers & avoid CORS 403
-    const effectiveUseProxy = useProxy || isHls || !!(customReferer && customReferer.trim()) || !!(customOrigin && customOrigin.trim());
-    const streamSrc = effectiveUseProxy ? proxyUrl : cleanUrl;
+    const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
+    const streamSrc = useProxy ? proxyUrl : cleanUrl;
 
     setActiveVideo({
       id,
@@ -356,17 +272,11 @@ export default function App() {
       directUrl: cleanUrl,
       proxyUrl: proxyUrl,
       isStreamingOnly: true,
-      referer: (customReferer || '').trim(),
-      origin: (customOrigin || '').trim(),
-      streamMode: effectiveUseProxy ? (isHls ? 'HLS Reverse Proxy' : 'Cloudflare Proxy') : 'Direct Browser Stream'
+      streamMode: useProxy ? 'Cloudflare Proxy' : 'Direct Browser Stream'
     });
 
     setVideoUrl('');
-    setStatusMessage(
-      effectiveUseProxy
-        ? (isHls ? 'Streaming protected HLS feed via Reverse Proxy.' : 'Streaming via Cloudflare Proxy.')
-        : 'Streaming directly from source (Your IP).'
-    );
+    setStatusMessage(useProxy ? 'Streaming via Cloudflare Proxy.' : 'Streaming directly from source (Your IP).');
 
     setTimeout(() => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -535,205 +445,14 @@ export default function App() {
               <div className="input-container">
                 <input
                   type="url"
-                  placeholder="Paste direct MP4, HLS (.m3u8), Streamtape, or Cloud video link..."
+                  placeholder="Paste direct MP4, Streamtape, or Cloud Drive video link..."
                   value={videoUrl}
-                  onChange={(e) => handleUrlInputChange(e.target.value)}
+                  onChange={(e) => setVideoUrl(e.target.value)}
                   disabled={isBuffering}
                   required
                   className="input-field"
                 />
               </div>
-
-              {/* Presets & Header Toggle Row */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', margin: '0.4rem 0' }}>
-                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setVideoUrl('https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8');
-                      setCustomReferer('https://mux.com/');
-                      setCustomOrigin('https://mux.com');
-                    }}
-                    className="btn-secondary"
-                    style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem', borderRadius: '6px' }}
-                    title="Load a sample HLS stream with referer headers"
-                  >
-                    Load HLS (.m3u8) Demo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setVideoUrl('https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4');
-                      setCustomReferer('');
-                      setCustomOrigin('');
-                    }}
-                    className="btn-secondary"
-                    style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem', borderRadius: '6px' }}
-                    title="Load standard Big Buck Bunny MP4 video"
-                  >
-                    Load MP4 Demo
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setShowAdvancedHeaders(!showAdvancedHeaders)}
-                  className="btn-secondary"
-                  style={{ padding: '0.2rem 0.55rem', fontSize: '0.72rem', borderRadius: '6px', color: (customReferer || customOrigin) ? '#22d3ee' : 'inherit' }}
-                >
-                  {showAdvancedHeaders ? '▲ Hide Headers' : '▼ Spoof Headers (Referer/Origin)'}
-                </button>
-              </div>
-
-              {/* Prominent Referer & Origin Headers Section */}
-              {showAdvancedHeaders && (
-                <div style={{
-                  background: 'rgba(255, 255, 255, 0.03)',
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
-                  borderRadius: '10px',
-                  padding: '0.85rem',
-                  marginTop: '0.5rem',
-                  marginBottom: '0.6rem'
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
-                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'hsl(var(--cyan-400))', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-                      <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                      </svg>
-                      Hotlink Protection Headers (User-Configured)
-                    </span>
-
-                    <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCustomReferer('https://surrit.com/');
-                          setCustomOrigin('https://surrit.com');
-                        }}
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.45rem', fontSize: '0.68rem', borderRadius: '5px' }}
-                        title="Set headers for surrit.com streams"
-                      >
-                        surrit.com
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCustomReferer('https://mux.com/');
-                          setCustomOrigin('https://mux.com');
-                        }}
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.45rem', fontSize: '0.68rem', borderRadius: '5px' }}
-                        title="Set headers for mux streams"
-                      >
-                        mux.com
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          try {
-                            const p = new URL(videoUrl.trim());
-                            setCustomReferer(`${p.origin}/`);
-                            setCustomOrigin(p.origin);
-                          } catch (e) {}
-                        }}
-                        disabled={!videoUrl}
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.45rem', fontSize: '0.68rem', borderRadius: '5px' }}
-                        title="Set Referer and Origin to the video host origin"
-                      >
-                        Auto Host
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCustomReferer('');
-                          setCustomOrigin('');
-                        }}
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.45rem', fontSize: '0.68rem', borderRadius: '5px' }}
-                        title="Clear Referer and Origin (Sends no custom headers)"
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  </div>
-
-                  <div style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-                    gap: '0.6rem'
-                  }}>
-                    <div>
-                      <label style={{ display: 'block', fontSize: '0.7rem', fontWeight: 600, color: 'hsl(var(--text-secondary))', marginBottom: '0.25rem' }}>
-                        Referer Header:
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. https://surrit.com/ or https://embed-host.com/"
-                        value={customReferer}
-                        onChange={(e) => setCustomReferer(e.target.value)}
-                        className="input-field"
-                        style={{ fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
-                      />
-                    </div>
-                    <div>
-                      <label style={{ display: 'block', fontSize: '0.7rem', fontWeight: 600, color: 'hsl(var(--text-secondary))', marginBottom: '0.25rem' }}>
-                        Origin Header:
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. https://surrit.com"
-                        value={customOrigin}
-                        onChange={(e) => setCustomOrigin(e.target.value)}
-                        className="input-field"
-                        style={{ fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
-                      />
-                    </div>
-                  </div>
-                  <div style={{ fontSize: '0.68rem', color: 'hsl(var(--text-muted))', marginTop: '0.35rem', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.35rem' }}>
-                    <span>Tip: Upstream reverse proxy attaches these exact headers to bypass 403 Forbidden & CORS protection.</span>
-                    <span style={{ color: customReferer || customOrigin ? '#22d3ee' : 'inherit' }}>
-                      Active: {customReferer || '(none)'}
-                    </span>
-                  </div>
-
-                  {/* Backend Proxy Endpoint Switcher */}
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.6rem', flexWrap: 'wrap', gap: '0.4rem', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '0.45rem' }}>
-                    <span style={{ fontSize: '0.68rem', color: 'hsl(var(--text-secondary))' }}>
-                      Proxy Host: <strong style={{ color: proxyBackendUrl.includes('localhost') ? '#a7f3d0' : '#22d3ee' }}>{proxyBackendUrl}</strong>
-                    </span>
-                    <div style={{ display: 'flex', gap: '0.3rem' }}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setProxyBackendUrl(defaultBackend);
-                          localStorage.setItem('qb_proxy_backend_url', defaultBackend);
-                          setStatusMessage(`Proxy switched to Cloud Vercel: ${defaultBackend}`);
-                        }}
-                        className="btn-secondary"
-                        style={{ padding: '0.15rem 0.45rem', fontSize: '0.65rem', borderColor: proxyBackendUrl === defaultBackend ? '#22d3ee' : undefined }}
-                      >
-                        Cloud (Vercel)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const localUrl = 'http://localhost:5000';
-                          setProxyBackendUrl(localUrl);
-                          localStorage.setItem('qb_proxy_backend_url', localUrl);
-                          setStatusMessage('Proxy switched to Localhost (http://localhost:5000)');
-                        }}
-                        className="btn-secondary"
-                        style={{ padding: '0.15rem 0.45rem', fontSize: '0.65rem', borderColor: proxyBackendUrl.includes('localhost') ? '#a7f3d0' : undefined }}
-                        title="Bypass Cloudflare datacenter blocks using your local computer residential IP"
-                      >
-                        Localhost:5000 (Your IP)
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               {/* Host Classification Badge */}
               {activeClassification && activeClassification.type !== 'invalid' && (
@@ -754,26 +473,25 @@ export default function App() {
               )}
 
               <div className="form-buttons-row" style={{ flexWrap: 'wrap', gap: '0.6rem', marginTop: '0.5rem' }}>
-                {/* When protected stream or custom headers are active, Reverse Proxy is primary */}
-                <button
-                  type="button"
-                  onClick={(e) => handleDirectStream(e, true)}
-                  disabled={isBuffering || !videoUrl}
-                  className={(customReferer || customOrigin || videoUrl.toLowerCase().includes('.m3u8')) ? 'btn-primary' : 'btn-secondary'}
-                  style={{ flex: '1 1 190px' }}
-                  title="Stream through Reverse Proxy to spoof Referer and Origin headers"
-                >
-                  <CloudIcon /> Stream via Proxy {customReferer ? '(Spoofed)' : ''}
-                </button>
                 <button
                   type="button"
                   onClick={(e) => handleDirectStream(e, false)}
                   disabled={isBuffering || !videoUrl}
-                  className={!(customReferer || customOrigin || videoUrl.toLowerCase().includes('.m3u8')) ? 'btn-primary' : 'btn-secondary'}
+                  className="btn-primary"
                   style={{ flex: '1 1 180px' }}
-                  title="Stream directly from your browser IP (Note: browser security prevents spoofing Referer/Origin directly)"
+                  title="Stream directly from your browser IP (bypasses proxy IP-locks on Streamtape/tapecontent)"
                 >
                   <PlayIcon /> Stream (Your IP)
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => handleDirectStream(e, true)}
+                  disabled={isBuffering || !videoUrl}
+                  className="btn-secondary"
+                  style={{ flex: '1 1 180px' }}
+                  title="Stream via Cloudflare Worker proxy"
+                >
+                  <CloudIcon /> Stream via Proxy
                 </button>
                 <button
                   type="submit"
@@ -904,9 +622,6 @@ export default function App() {
                 streamMode={activeVideo.streamMode}
                 onSwitchSource={handleSwitchStreamSource}
                 onOpenGuide={() => setShowGuideModal(true)}
-                customReferer={activeVideo.referer || customReferer}
-                customOrigin={activeVideo.origin || customOrigin}
-                onUpdateHeaders={handleUpdateHeadersFromPlayer}
               />
             </div>
           ) : (
