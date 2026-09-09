@@ -145,19 +145,24 @@ export function classifyVideoUrl(url) {
  * @param {Function} options.onProgress Callback for progress: (data) => {}
  * @param {Function} options.checkThrottle Callback to check if download should throttle for player
  * @param {AbortSignal} options.signal AbortController signal for cancellation
+ * @param {string} [options.referer] Custom Referer header
+ * @param {string} [options.origin] Custom Origin header
  */
-export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal }) {
+export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal, referer, origin } = {}) {
   const cleanUrl = preprocessVideoUrl(videoUrl);
   const rawBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
   const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
   const encodedUrl = encodeURIComponent(cleanUrl);
-  const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
+  
+  let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
+  if (referer && referer.trim()) proxyUrl += `&referer=${encodeURIComponent(referer.trim())}`;
+  if (origin && origin.trim()) proxyUrl += `&origin=${encodeURIComponent(origin.trim())}`;
 
   const hostClassification = classifyVideoUrl(cleanUrl);
 
   if (hostClassification.isHls) {
     throw new Error(
-      'HLS (.m3u8) feeds are dynamic multi-segment streams and cannot be cached into a single offline file. Click "Stream (Cloudflare Proxy)" or "Direct Stream" to play immediately!'
+      'HLS (.m3u8) feeds are dynamic multi-segment streams and cannot be cached into a single offline file. Click "Stream via Proxy" to play immediately!'
     );
   }
 
@@ -166,7 +171,10 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
 
   // 1. First attempt to probe metadata via Proxy
   try {
-    const infoRes = await fetch(`${backendBaseUrl}/api/info?url=${encodedUrl}`, { signal });
+    let probeUrl = `${backendBaseUrl}/api/info?url=${encodedUrl}`;
+    if (referer && referer.trim()) probeUrl += `&referer=${encodeURIComponent(referer.trim())}`;
+    if (origin && origin.trim()) probeUrl += `&origin=${encodeURIComponent(origin.trim())}`;
+    const infoRes = await fetch(probeUrl, { signal });
     if (infoRes.ok) {
       info = await infoRes.json();
     }

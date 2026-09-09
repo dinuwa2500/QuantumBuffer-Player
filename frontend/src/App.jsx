@@ -115,15 +115,19 @@ export default function App() {
     } catch (e) {
       return 'Direct Video File';
     }
-  // Auto-detect and sync Referer/Origin when a video URL is typed or pasted
+  };
+
+  // Auto-detect and sync Referer/Origin only if not manually customized by the user
   const handleUrlInputChange = (val) => {
     setVideoUrl(val);
     if (!val || !val.trim()) return;
     try {
       const parsed = new URL(val.trim());
-      // If referer is empty or was set to an unrelated demo like mux.com, auto-update:
-      if (!customReferer || (customReferer.includes('mux.com') && !val.includes('mux.com'))) {
+      // Only auto-fill if the user has not entered a custom referer or origin
+      if (!customReferer) {
         setCustomReferer(`${parsed.origin}/`);
+      }
+      if (!customOrigin) {
         setCustomOrigin(parsed.origin);
       }
     } catch (e) {}
@@ -246,6 +250,8 @@ export default function App() {
       setStatusMessage('Buffering stream to browser cache...');
       
       const result = await bufferVideo(cleanUrl, {
+        referer: customReferer,
+        origin: customOrigin,
         onProgress: (progressData) => {
           setProgress(progressData);
         },
@@ -313,7 +319,8 @@ export default function App() {
     if (!videoUrl.trim()) return;
 
     const cleanUrl = preprocessVideoUrl(videoUrl);
-    const isHls = cleanUrl.toLowerCase().includes('.m3u8') || (activeClassification && activeClassification.isHls);
+    const classification = classifyVideoUrl(cleanUrl);
+    const isHls = cleanUrl.toLowerCase().includes('.m3u8') || classification.isHls;
     setErrorMessage('');
     setStatusMessage(
       useProxy
@@ -341,6 +348,8 @@ export default function App() {
       directUrl: cleanUrl,
       proxyUrl: proxyUrl,
       isStreamingOnly: true,
+      referer: (customReferer || '').trim(),
+      origin: (customOrigin || '').trim(),
       streamMode: useProxy ? (isHls ? 'HLS Reverse Proxy' : 'Cloudflare Proxy') : 'Direct Browser Stream'
     });
 
@@ -586,7 +595,31 @@ export default function App() {
                       Hotlink Protection Headers (User-Configured)
                     </span>
 
-                    <div style={{ display: 'flex', gap: '0.4rem' }}>
+                    <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomReferer('https://surrit.com/');
+                          setCustomOrigin('https://surrit.com');
+                        }}
+                        className="btn-secondary"
+                        style={{ padding: '0.2rem 0.45rem', fontSize: '0.68rem', borderRadius: '5px' }}
+                        title="Set headers for surrit.com streams"
+                      >
+                        surrit.com
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomReferer('https://mux.com/');
+                          setCustomOrigin('https://mux.com');
+                        }}
+                        className="btn-secondary"
+                        style={{ padding: '0.2rem 0.45rem', fontSize: '0.68rem', borderRadius: '5px' }}
+                        title="Set headers for mux streams"
+                      >
+                        mux.com
+                      </button>
                       <button
                         type="button"
                         onClick={() => {
@@ -598,10 +631,10 @@ export default function App() {
                         }}
                         disabled={!videoUrl}
                         className="btn-secondary"
-                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', borderRadius: '5px' }}
+                        style={{ padding: '0.2rem 0.45rem', fontSize: '0.68rem', borderRadius: '5px' }}
                         title="Set Referer and Origin to the video host origin"
                       >
-                        Auto-fill URL Origin
+                        Auto Host
                       </button>
                       <button
                         type="button"
@@ -610,8 +643,8 @@ export default function App() {
                           setCustomOrigin('');
                         }}
                         className="btn-secondary"
-                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', borderRadius: '5px' }}
-                        title="Clear Referer and Origin"
+                        style={{ padding: '0.2rem 0.45rem', fontSize: '0.68rem', borderRadius: '5px' }}
+                        title="Clear Referer and Origin (Sends no custom headers)"
                       >
                         Clear
                       </button>
@@ -629,7 +662,7 @@ export default function App() {
                       </label>
                       <input
                         type="text"
-                        placeholder="e.g. https://surrit.com/ or embedding site"
+                        placeholder="e.g. https://surrit.com/ or https://embed-host.com/"
                         value={customReferer}
                         onChange={(e) => setCustomReferer(e.target.value)}
                         className="input-field"
@@ -650,8 +683,11 @@ export default function App() {
                       />
                     </div>
                   </div>
-                  <div style={{ fontSize: '0.68rem', color: 'hsl(var(--text-muted))', marginTop: '0.35rem' }}>
-                    Tip: Video providers check the <code>Referer</code> header to prevent hotlinking. Enter the domain or site URL where this video was found.
+                  <div style={{ fontSize: '0.68rem', color: 'hsl(var(--text-muted))', marginTop: '0.35rem', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.35rem' }}>
+                    <span>Tip: Upstream reverse proxy attaches these exact headers to bypass 403 Forbidden & CORS protection.</span>
+                    <span style={{ color: customReferer || customOrigin ? '#22d3ee' : 'inherit' }}>
+                      Active: {customReferer || '(none)'}
+                    </span>
                   </div>
                 </div>
               )}
@@ -675,25 +711,26 @@ export default function App() {
               )}
 
               <div className="form-buttons-row" style={{ flexWrap: 'wrap', gap: '0.6rem', marginTop: '0.5rem' }}>
-                <button
-                  type="button"
-                  onClick={(e) => handleDirectStream(e, false)}
-                  disabled={isBuffering || !videoUrl}
-                  className="btn-primary"
-                  style={{ flex: '1 1 180px' }}
-                  title="Stream directly from your browser IP (bypasses proxy IP-locks on Streamtape/tapecontent)"
-                >
-                  <PlayIcon /> Stream (Your IP)
-                </button>
+                {/* When protected stream or custom headers are active, Reverse Proxy is primary */}
                 <button
                   type="button"
                   onClick={(e) => handleDirectStream(e, true)}
                   disabled={isBuffering || !videoUrl}
-                  className="btn-secondary"
-                  style={{ flex: '1 1 180px' }}
-                  title="Stream via Cloudflare Worker proxy"
+                  className={(customReferer || customOrigin || videoUrl.toLowerCase().includes('.m3u8')) ? 'btn-primary' : 'btn-secondary'}
+                  style={{ flex: '1 1 190px' }}
+                  title="Stream through Reverse Proxy to spoof Referer and Origin headers"
                 >
-                  <CloudIcon /> Stream via Proxy
+                  <CloudIcon /> Stream via Proxy {customReferer ? '(Spoofed)' : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => handleDirectStream(e, false)}
+                  disabled={isBuffering || !videoUrl}
+                  className={!(customReferer || customOrigin || videoUrl.toLowerCase().includes('.m3u8')) ? 'btn-primary' : 'btn-secondary'}
+                  style={{ flex: '1 1 180px' }}
+                  title="Stream directly from your browser IP (Note: browser security prevents spoofing Referer/Origin directly)"
+                >
+                  <PlayIcon /> Stream (Your IP)
                 </button>
                 <button
                   type="submit"

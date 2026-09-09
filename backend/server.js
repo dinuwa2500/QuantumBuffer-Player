@@ -179,7 +179,31 @@ app.get('/api/info', async (req, res) => {
   }
 
   const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
-  const referer = getSmartReferer(videoUrl, req.query.referer || req.headers['x-referer']);
+  
+  const customReferer = req.query.referer !== undefined ? req.query.referer : req.headers['x-referer'];
+  const customOrigin = req.query.origin !== undefined ? req.query.origin : req.headers['x-origin'];
+
+  let referer = '';
+  if (customReferer !== undefined && customReferer !== null) {
+    const trimmed = customReferer.trim().toLowerCase();
+    if (trimmed !== 'none' && trimmed !== 'null' && trimmed !== 'blank' && trimmed !== '') {
+      referer = customReferer.trim();
+    }
+  } else {
+    referer = getSmartReferer(videoUrl);
+  }
+
+  let targetOrigin = '';
+  if (customOrigin !== undefined && customOrigin !== null) {
+    const trimmed = customOrigin.trim().toLowerCase();
+    if (trimmed !== 'none' && trimmed !== 'null' && trimmed !== 'blank' && trimmed !== '') {
+      targetOrigin = customOrigin.trim();
+    }
+  } else {
+    try {
+      targetOrigin = new URL(videoUrl).origin;
+    } catch (e) {}
+  }
 
   const headers = {
     'User-Agent': userAgent,
@@ -187,6 +211,7 @@ app.get('/api/info', async (req, res) => {
     'Accept-Encoding': 'identity;q=1, *;q=0'
   };
   if (referer) headers['Referer'] = referer;
+  if (targetOrigin) headers['Origin'] = targetOrigin;
 
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
   if (clientIp) {
@@ -409,14 +434,14 @@ app.get('/api/proxy', async (req, res) => {
   }
 
   // Extract optional referer / origin overrides (plain or base64)
-  let customReferer = req.query.referer || req.headers['x-referer'];
+  let customReferer = req.query.referer !== undefined ? req.query.referer : req.headers['x-referer'];
   if (!customReferer && req.query.b64ref) {
     try {
       customReferer = Buffer.from(req.query.b64ref, 'base64').toString('utf-8');
     } catch (e) {}
   }
 
-  let customOrigin = req.query.origin || req.headers['x-origin'];
+  let customOrigin = req.query.origin !== undefined ? req.query.origin : req.headers['x-origin'];
   if (!customOrigin && req.query.b64origin) {
     try {
       customOrigin = Buffer.from(req.query.b64origin, 'base64').toString('utf-8');
@@ -424,13 +449,41 @@ app.get('/api/proxy', async (req, res) => {
   }
 
   const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
-  const referer = getSmartReferer(videoUrl, customReferer);
 
-  let targetOrigin = customOrigin;
-  if (!targetOrigin) {
+  // Determine upstream Referer header:
+  // - If user explicitly passed 'none', 'null', 'blank', or empty string: send NO Referer
+  // - If user entered a specific string: send that exact Referer
+  // - If omitted: fallback to getSmartReferer
+  let referer = '';
+  if (customReferer !== undefined && customReferer !== null) {
+    const trimmedRef = customReferer.trim().toLowerCase();
+    if (trimmedRef === 'none' || trimmedRef === 'null' || trimmedRef === 'blank' || trimmedRef === '') {
+      referer = ''; // User explicitly wants no referer header
+    } else {
+      referer = customReferer.trim();
+    }
+  } else {
+    referer = getSmartReferer(videoUrl);
+  }
+
+  // Determine upstream Origin header:
+  // - If user explicitly passed 'none', 'null', 'blank', or empty string: send NO Origin
+  // - If user entered a specific string: send that exact Origin
+  // - If omitted: fallback to target URL's origin
+  let targetOrigin = '';
+  if (customOrigin !== undefined && customOrigin !== null) {
+    const trimmedOrig = customOrigin.trim().toLowerCase();
+    if (trimmedOrig === 'none' || trimmedOrig === 'null' || trimmedOrig === 'blank' || trimmedOrig === '') {
+      targetOrigin = ''; // User explicitly wants no origin header
+    } else {
+      targetOrigin = customOrigin.trim();
+    }
+  } else {
     try {
       targetOrigin = new URL(videoUrl).origin;
-    } catch (e) {}
+    } catch (e) {
+      targetOrigin = '';
+    }
   }
 
   try {

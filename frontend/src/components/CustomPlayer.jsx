@@ -46,7 +46,10 @@ export default function CustomPlayer({
   proxyUrl,
   streamMode,
   onSwitchSource,
-  onOpenGuide
+  onOpenGuide,
+  customReferer = '',
+  customOrigin = '',
+  onUpdateHeaders
 }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
@@ -60,6 +63,19 @@ export default function CustomPlayer({
   const [showControls, setShowControls] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [playerError, setPlayerError] = useState(null);
+
+  // In-player Header spoofing state (Referer & Origin)
+  const [editReferer, setEditReferer] = useState(customReferer || '');
+  const [editOrigin, setEditOrigin] = useState(customOrigin || '');
+  const [showInPlayerHeaders, setShowInPlayerHeaders] = useState(false);
+
+  useEffect(() => {
+    setEditReferer(customReferer || '');
+  }, [customReferer]);
+
+  useEffect(() => {
+    setEditOrigin(customOrigin || '');
+  }, [customOrigin]);
 
   // Sync play state to parent
   useEffect(() => {
@@ -532,6 +548,15 @@ export default function CustomPlayer({
                 <SwitchIcon /> Switch to {isProxyActive ? 'Direct Stream' : 'Proxy Stream'}
               </button>
             )}
+
+            <button
+              onClick={() => setShowInPlayerHeaders(!showInPlayerHeaders)}
+              className="btn-secondary"
+              style={{ padding: '0.2rem 0.6rem', fontSize: '0.7rem', height: 'auto', color: (editReferer || editOrigin) ? '#22d3ee' : 'inherit' }}
+              title="Inspect or adjust spoofed Referer and Origin headers"
+            >
+              ⚙ Headers {editReferer ? '(Active)' : ''}
+            </button>
           </div>
           <h2 className="player-video-title">{title}</h2>
         </div>
@@ -544,12 +569,126 @@ export default function CustomPlayer({
         </button>
       </div>
 
+      {/* In-Player Dropdown Header Editor */}
+      {showInPlayerHeaders && (
+        <div style={{
+          position: 'absolute',
+          top: '4.5rem',
+          left: '1rem',
+          right: '1rem',
+          maxWidth: '520px',
+          margin: '0 auto',
+          background: 'rgba(15, 18, 28, 0.95)',
+          border: '1px solid rgba(34, 211, 238, 0.3)',
+          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.6)',
+          borderRadius: '12px',
+          padding: '1rem',
+          zIndex: 45,
+          backdropFilter: 'blur(12px)'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
+            <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'hsl(var(--cyan-400))' }}>
+              Configure Stream Headers (Referer & Origin)
+            </span>
+            <div style={{ display: 'flex', gap: '0.3rem' }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditReferer('https://surrit.com/');
+                  setEditOrigin('https://surrit.com');
+                }}
+                className="btn-secondary"
+                style={{ padding: '0.15rem 0.4rem', fontSize: '0.65rem' }}
+              >
+                surrit.com
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditReferer('https://mux.com/');
+                  setEditOrigin('https://mux.com');
+                }}
+                className="btn-secondary"
+                style={{ padding: '0.15rem 0.4rem', fontSize: '0.65rem' }}
+              >
+                mux.com
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditReferer('');
+                  setEditOrigin('');
+                }}
+                className="btn-secondary"
+                style={{ padding: '0.15rem 0.4rem', fontSize: '0.65rem' }}
+              >
+                None
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '0.2rem' }}>
+                Referer:
+              </label>
+              <input
+                type="text"
+                value={editReferer}
+                onChange={(e) => setEditReferer(e.target.value)}
+                placeholder="e.g. https://surrit.com/"
+                className="input-field"
+                style={{ fontSize: '0.75rem', padding: '0.35rem 0.5rem', width: '100%' }}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '0.2rem' }}>
+                Origin:
+              </label>
+              <input
+                type="text"
+                value={editOrigin}
+                onChange={(e) => setEditOrigin(e.target.value)}
+                placeholder="e.g. https://surrit.com"
+                className="input-field"
+                style={{ fontSize: '0.75rem', padding: '0.35rem 0.5rem', width: '100%' }}
+              />
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button
+              type="button"
+              onClick={() => {
+                if (onUpdateHeaders) {
+                  onUpdateHeaders(editReferer, editOrigin);
+                }
+                setShowInPlayerHeaders(false);
+                handleRetry();
+              }}
+              className="btn-primary"
+              style={{ flex: 1, padding: '0.4rem 0.8rem', fontSize: '0.78rem', justifyContent: 'center' }}
+            >
+              Apply Headers & Reload
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowInPlayerHeaders(false)}
+              className="btn-secondary"
+              style={{ padding: '0.4rem 0.8rem', fontSize: '0.78rem' }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Player Error Overlay */}
       {playerError && (
         <div className="player-error-overlay" style={{
           position: 'absolute',
           inset: 0,
-          background: 'rgba(10, 10, 16, 0.9)',
+          background: 'rgba(10, 10, 16, 0.92)',
           backdropFilter: 'blur(8px)',
           display: 'flex',
           flexDirection: 'column',
@@ -557,29 +696,127 @@ export default function CustomPlayer({
           justifyContent: 'center',
           padding: '2rem',
           textAlign: 'center',
-          zIndex: 40
+          zIndex: 40,
+          overflowY: 'auto'
         }}>
           <div style={{
-            width: '3.5rem',
-            height: '3.5rem',
+            width: '3.2rem',
+            height: '3.2rem',
             borderRadius: '50%',
             background: 'rgba(239, 68, 68, 0.15)',
             border: '1px solid rgba(239, 68, 68, 0.3)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            marginBottom: '1rem'
+            marginBottom: '0.75rem'
           }}>
             <svg className="icon-lg" style={{ color: '#ef4444' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
           </div>
-          <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: '#f87171', marginBottom: '0.5rem' }}>
+          <h3 style={{ fontSize: '1.25rem', fontWeight: 600, color: '#f87171', marginBottom: '0.35rem' }}>
             Playback Error
           </h3>
-          <p style={{ maxWidth: '460px', fontSize: '0.875rem', color: 'hsl(var(--text-secondary))', lineHeight: '1.5', marginBottom: '1.5rem' }}>
+          <p style={{ maxWidth: '460px', fontSize: '0.875rem', color: 'hsl(var(--text-secondary))', lineHeight: '1.5', marginBottom: '1rem' }}>
             {playerError}
           </p>
+
+          {/* In-Player Header Adjuster & Presets */}
+          <div style={{
+            background: 'rgba(255, 255, 255, 0.05)',
+            border: '1px solid rgba(255, 255, 255, 0.15)',
+            borderRadius: '12px',
+            padding: '1rem',
+            marginBottom: '1.25rem',
+            width: '100%',
+            maxWidth: '480px',
+            textAlign: 'left'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem', flexWrap: 'wrap', gap: '0.35rem' }}>
+              <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'hsl(var(--cyan-400))' }}>
+                Hotlink Headers (Referer & Origin)
+              </span>
+              <div style={{ display: 'flex', gap: '0.3rem' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditReferer('https://surrit.com/');
+                    setEditOrigin('https://surrit.com');
+                  }}
+                  className="btn-secondary"
+                  style={{ padding: '0.15rem 0.45rem', fontSize: '0.65rem' }}
+                >
+                  surrit.com
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditReferer('https://mux.com/');
+                    setEditOrigin('https://mux.com');
+                  }}
+                  className="btn-secondary"
+                  style={{ padding: '0.15rem 0.45rem', fontSize: '0.65rem' }}
+                >
+                  mux.com
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditReferer('');
+                    setEditOrigin('');
+                  }}
+                  className="btn-secondary"
+                  style={{ padding: '0.15rem 0.45rem', fontSize: '0.65rem' }}
+                >
+                  None
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.5rem', marginBottom: '0.75rem' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '0.2rem' }}>
+                  Referer:
+                </label>
+                <input
+                  type="text"
+                  value={editReferer}
+                  onChange={(e) => setEditReferer(e.target.value)}
+                  placeholder="e.g. https://surrit.com/"
+                  className="input-field"
+                  style={{ fontSize: '0.75rem', padding: '0.35rem 0.5rem', width: '100%' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '0.2rem' }}>
+                  Origin:
+                </label>
+                <input
+                  type="text"
+                  value={editOrigin}
+                  onChange={(e) => setEditOrigin(e.target.value)}
+                  placeholder="e.g. https://surrit.com"
+                  className="input-field"
+                  style={{ fontSize: '0.75rem', padding: '0.35rem 0.5rem', width: '100%' }}
+                />
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (onUpdateHeaders) {
+                  onUpdateHeaders(editReferer, editOrigin);
+                }
+                handleRetry();
+              }}
+              className="btn-primary"
+              style={{ width: '100%', padding: '0.45rem 1rem', fontSize: '0.8rem', justifyContent: 'center' }}
+            >
+              Apply Headers & Reload Stream
+            </button>
+          </div>
+
           <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'center' }}>
             {/* Contextual actions based on detected host */}
             {(getHostFromUrl(directUrl || src).includes('sharepoint.com') || getHostFromUrl(directUrl || src).includes('1drv.ms')) && (
@@ -613,7 +850,7 @@ export default function CustomPlayer({
             {isProxyActive && directUrl && onSwitchSource && !getHostFromUrl(directUrl).includes('sharepoint.com') && (
               <button
                 onClick={() => onSwitchSource('direct')}
-                className="btn-primary"
+                className="btn-secondary"
                 style={{ padding: '0.5rem 1.25rem' }}
               >
                 <PlayIcon /> Play Direct Stream (Your IP)
@@ -626,7 +863,7 @@ export default function CustomPlayer({
                 className="btn-primary"
                 style={{ padding: '0.5rem 1.25rem' }}
               >
-                <PlayIcon /> Try Cloudflare Proxy Stream
+                <PlayIcon /> Try Reverse Proxy Stream
               </button>
             )}
 
