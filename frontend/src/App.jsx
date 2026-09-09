@@ -339,7 +339,9 @@ export default function App() {
     if (customOrigin && customOrigin.trim()) {
       proxyUrl += `&origin=${encodeURIComponent(customOrigin.trim())}`;
     }
-    const streamSrc = useProxy ? proxyUrl : cleanUrl;
+    // If stream is HLS (.m3u8) or user entered custom headers, it must route through Reverse Proxy to spoof headers & avoid CORS 403
+    const effectiveUseProxy = useProxy || isHls || !!(customReferer && customReferer.trim()) || !!(customOrigin && customOrigin.trim());
+    const streamSrc = effectiveUseProxy ? proxyUrl : cleanUrl;
 
     setActiveVideo({
       id,
@@ -350,12 +352,12 @@ export default function App() {
       isStreamingOnly: true,
       referer: (customReferer || '').trim(),
       origin: (customOrigin || '').trim(),
-      streamMode: useProxy ? (isHls ? 'HLS Reverse Proxy' : 'Cloudflare Proxy') : 'Direct Browser Stream'
+      streamMode: effectiveUseProxy ? (isHls ? 'HLS Reverse Proxy' : 'Cloudflare Proxy') : 'Direct Browser Stream'
     });
 
     setVideoUrl('');
     setStatusMessage(
-      useProxy
+      effectiveUseProxy
         ? (isHls ? 'Streaming protected HLS feed via Reverse Proxy.' : 'Streaming via Cloudflare Proxy.')
         : 'Streaming directly from source (Your IP).'
     );

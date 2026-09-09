@@ -137,7 +137,9 @@ export default function CustomPlayer({
       });
       hlsRef.current = hls;
 
-      hls.loadSource(src);
+      // If the source is a direct remote HLS URL and proxyUrl is available, route via proxy to prevent CORS 403
+      const effectiveSrc = (isHls && !src.includes('/api/proxy') && !src.startsWith('blob:') && proxyUrl) ? proxyUrl : src;
+      hls.loadSource(effectiveSrc);
       hls.attachMedia(video);
 
       hls.on(HlsClass.Events.MANIFEST_PARSED, () => {
@@ -151,8 +153,25 @@ export default function CustomPlayer({
         if (data.fatal) {
           switch (data.type) {
             case HlsClass.ErrorTypes.NETWORK_ERROR:
-              console.warn('HLS fatal network error, attempting reload...');
-              hls.startLoad();
+              console.warn('HLS fatal network error:', data.details);
+              // If direct stream was blocked by CORS / 403, auto-switch to reverse proxy!
+              if (!src.includes('/api/proxy') && proxyUrl && onSwitchSource) {
+                console.info('Direct HLS blocked by CORS. Auto-switching to Reverse Proxy stream...');
+                onSwitchSource('proxy');
+                return;
+              }
+              // Prevent infinite reload loop on 403 / CORS
+              if (!hls.retryCount) hls.retryCount = 0;
+              hls.retryCount++;
+              if (hls.retryCount <= 2) {
+                console.warn('Retrying HLS stream load...');
+                hls.startLoad();
+              } else {
+                setPlayerError(
+                  `HLS stream error: ${data.details || 'Remote server blocked request (403/CORS)'}. Verify or customize the Referer & Origin headers below and click 'Apply Headers & Reload'.`
+                );
+                hls.destroy();
+              }
               break;
             case HlsClass.ErrorTypes.MEDIA_ERROR:
               console.warn('HLS fatal media error, recovering...');
