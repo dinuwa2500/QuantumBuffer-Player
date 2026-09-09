@@ -58,7 +58,7 @@ export default function App() {
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [customReferer, setCustomReferer] = useState('');
   const [customOrigin, setCustomOrigin] = useState('');
-  const [showAdvancedHeaders, setShowAdvancedHeaders] = useState(false);
+  const [showAdvancedHeaders, setShowAdvancedHeaders] = useState(true);
   
   const abortControllerRef = useRef(null);
   const isPlayerPlayingRef = useRef(false);
@@ -115,6 +115,45 @@ export default function App() {
     } catch (e) {
       return 'Direct Video File';
     }
+  // Auto-detect and sync Referer/Origin when a video URL is typed or pasted
+  const handleUrlInputChange = (val) => {
+    setVideoUrl(val);
+    if (!val || !val.trim()) return;
+    try {
+      const parsed = new URL(val.trim());
+      // If referer is empty or was set to an unrelated demo like mux.com, auto-update:
+      if (!customReferer || (customReferer.includes('mux.com') && !val.includes('mux.com'))) {
+        setCustomReferer(`${parsed.origin}/`);
+        setCustomOrigin(parsed.origin);
+      }
+    } catch (e) {}
+  };
+
+  // Sync headers updated from inside the CustomPlayer error overlay
+  const handleUpdateHeadersFromPlayer = (newReferer, newOrigin) => {
+    setCustomReferer(newReferer);
+    setCustomOrigin(newOrigin);
+    if (!activeVideo || !activeVideo.directUrl) return;
+
+    const rawBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const backendBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+    let newProxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(activeVideo.directUrl)}`;
+    if (newReferer && newReferer.trim()) {
+      newProxyUrl += `&referer=${encodeURIComponent(newReferer.trim())}`;
+    }
+    if (newOrigin && newOrigin.trim()) {
+      newProxyUrl += `&origin=${encodeURIComponent(newOrigin.trim())}`;
+    }
+
+    const isUsingProxy = activeVideo.blobUrl && activeVideo.blobUrl.includes('/api/proxy');
+    setActiveVideo(prev => ({
+      ...prev,
+      proxyUrl: newProxyUrl,
+      blobUrl: isUsingProxy ? newProxyUrl : prev.blobUrl,
+      referer: newReferer.trim(),
+      origin: newOrigin.trim()
+    }));
+    setStatusMessage(`Applied updated headers: Referer=${newReferer || '(none)'}`);
   };
 
   // Handle local video file import (e.g. downloaded SLIIT SharePoint recording)
@@ -481,7 +520,7 @@ export default function App() {
                   type="url"
                   placeholder="Paste direct MP4, HLS (.m3u8), Streamtape, or Cloud video link..."
                   value={videoUrl}
-                  onChange={(e) => setVideoUrl(e.target.value)}
+                  onChange={(e) => handleUrlInputChange(e.target.value)}
                   disabled={isBuffering}
                   required
                   className="input-field"
@@ -529,43 +568,90 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Expandable Referer & Origin Headers Section */}
+              {/* Prominent Referer & Origin Headers Section */}
               {showAdvancedHeaders && (
                 <div style={{
                   background: 'rgba(255, 255, 255, 0.03)',
-                  border: '1px solid rgba(255, 255, 255, 0.08)',
-                  borderRadius: '8px',
-                  padding: '0.75rem',
-                  marginBottom: '0.5rem',
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-                  gap: '0.6rem'
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  borderRadius: '10px',
+                  padding: '0.85rem',
+                  marginTop: '0.5rem',
+                  marginBottom: '0.6rem'
                 }}>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '0.25rem' }}>
-                      Required Referer Header (Optional):
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. https://authorized-site.com/"
-                      value={customReferer}
-                      onChange={(e) => setCustomReferer(e.target.value)}
-                      className="input-field"
-                      style={{ fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
-                    />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'hsl(var(--cyan-400))', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                      </svg>
+                      Hotlink Protection Headers (User-Configured)
+                    </span>
+
+                    <div style={{ display: 'flex', gap: '0.4rem' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          try {
+                            const p = new URL(videoUrl.trim());
+                            setCustomReferer(`${p.origin}/`);
+                            setCustomOrigin(p.origin);
+                          } catch (e) {}
+                        }}
+                        disabled={!videoUrl}
+                        className="btn-secondary"
+                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', borderRadius: '5px' }}
+                        title="Set Referer and Origin to the video host origin"
+                      >
+                        Auto-fill URL Origin
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomReferer('');
+                          setCustomOrigin('');
+                        }}
+                        className="btn-secondary"
+                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.7rem', borderRadius: '5px' }}
+                        title="Clear Referer and Origin"
+                      >
+                        Clear
+                      </button>
+                    </div>
                   </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '0.25rem' }}>
-                      Required Origin Header (Optional):
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. https://authorized-site.com"
-                      value={customOrigin}
-                      onChange={(e) => setCustomOrigin(e.target.value)}
-                      className="input-field"
-                      style={{ fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
-                    />
+
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                    gap: '0.6rem'
+                  }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.7rem', fontWeight: 600, color: 'hsl(var(--text-secondary))', marginBottom: '0.25rem' }}>
+                        Referer Header:
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. https://surrit.com/ or embedding site"
+                        value={customReferer}
+                        onChange={(e) => setCustomReferer(e.target.value)}
+                        className="input-field"
+                        style={{ fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.7rem', fontWeight: 600, color: 'hsl(var(--text-secondary))', marginBottom: '0.25rem' }}>
+                        Origin Header:
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. https://surrit.com"
+                        value={customOrigin}
+                        onChange={(e) => setCustomOrigin(e.target.value)}
+                        className="input-field"
+                        style={{ fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
+                      />
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '0.68rem', color: 'hsl(var(--text-muted))', marginTop: '0.35rem' }}>
+                    Tip: Video providers check the <code>Referer</code> header to prevent hotlinking. Enter the domain or site URL where this video was found.
                   </div>
                 </div>
               )}
@@ -738,6 +824,9 @@ export default function App() {
                 streamMode={activeVideo.streamMode}
                 onSwitchSource={handleSwitchStreamSource}
                 onOpenGuide={() => setShowGuideModal(true)}
+                customReferer={activeVideo.referer || customReferer}
+                customOrigin={activeVideo.origin || customOrigin}
+                onUpdateHeaders={handleUpdateHeadersFromPlayer}
               />
             </div>
           ) : (
