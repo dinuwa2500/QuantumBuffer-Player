@@ -72,17 +72,107 @@ export default function CustomPlayer({
   const prevSrcRef = useRef(src);
   const timeToRestoreRef = useRef(null);
   const wasPlayingRef = useRef(false);
+  const hlsRef = useRef(null);
 
+  // Helper to obtain Hls class from global window or module
+  const getHlsClass = () => {
+    if (typeof window !== 'undefined' && window.Hls) {
+      return window.Hls;
+    }
+    return null;
+  };
+
+  // Helper to check if a URL represents an HLS manifest
+  const isHlsUrl = (urlStr) => {
+    if (!urlStr) return false;
+    const lower = urlStr.toLowerCase();
+    return (
+      lower.includes('.m3u8') ||
+      lower.includes('application%2fvnd.apple.mpegurl') ||
+      lower.includes('vnd.apple.mpegurl')
+    );
+  };
+
+  // Main stream loader effect (HLS vs native MP4)
   useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !src) return;
+
     setPlayerError(null);
+    const isHls = isHlsUrl(src) || isHlsUrl(directUrl);
+    const HlsClass = getHlsClass();
+
+    // Destroy existing Hls instance if any
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+
+    if (isHls && HlsClass && HlsClass.isSupported()) {
+      // Clear native src to prevent browser media element conflicts
+      video.removeAttribute('src');
+
+      const hls = new HlsClass({
+        enableWorker: true,
+        lowLatencyMode: true,
+        backBufferLength: 90,
+        fragLoadingTimeOut: 20000,
+        manifestLoadingTimeOut: 20000,
+      });
+      hlsRef.current = hls;
+
+      hls.loadSource(src);
+      hls.attachMedia(video);
+
+      hls.on(HlsClass.Events.MANIFEST_PARSED, () => {
+        setPlayerError(null);
+        if (wasPlayingRef.current) {
+          video.play().catch(() => {});
+        }
+      });
+
+      hls.on(HlsClass.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          switch (data.type) {
+            case HlsClass.ErrorTypes.NETWORK_ERROR:
+              console.warn('HLS fatal network error, attempting reload...');
+              hls.startLoad();
+              break;
+            case HlsClass.ErrorTypes.MEDIA_ERROR:
+              console.warn('HLS fatal media error, recovering...');
+              hls.recoverMediaError();
+              break;
+            default:
+              console.error('Fatal unrecoverable HLS error:', data.details);
+              setPlayerError(`HLS playback error: ${data.details || 'Stream unreachable'}`);
+              hls.destroy();
+              break;
+          }
+        }
+      });
+    } else if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Safari / iOS WebKit native HLS support
+      video.src = src;
+    } else {
+      // Standard MP4 or Blob
+      video.src = src;
+    }
+
     if (prevSrcRef.current !== src) {
-      if (videoRef.current && prevSrcRef.current) {
-        timeToRestoreRef.current = videoRef.current.currentTime;
-        wasPlayingRef.current = !videoRef.current.paused;
+      if (prevSrcRef.current) {
+        timeToRestoreRef.current = video.currentTime;
+        wasPlayingRef.current = !video.paused;
       }
       prevSrcRef.current = src;
     }
-  }, [src]);
+
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
+  }, [src, directUrl]);
 
   // Format time (seconds to MM:SS or HH:MM:SS)
   const formatTime = (timeInSeconds) => {
@@ -184,7 +274,14 @@ export default function CustomPlayer({
 
   const handleRetry = () => {
     setPlayerError(null);
-    if (videoRef.current) {
+    const isHls = isHlsUrl(src) || isHlsUrl(directUrl);
+    if (isHls && hlsRef.current) {
+      hlsRef.current.loadSource(src);
+      hlsRef.current.startLoad();
+      if (videoRef.current) {
+        videoRef.current.play().catch(() => {});
+      }
+    } else if (videoRef.current) {
       videoRef.current.load();
       videoRef.current.play().catch(err => {
         console.warn('Retry play failed:', err);
@@ -405,7 +502,6 @@ export default function CustomPlayer({
       {/* Video Element */}
       <video
         ref={videoRef}
-        src={src}
         className="video-element"
         onClick={togglePlay}
         onPlay={handlePlay}
@@ -420,8 +516,10 @@ export default function CustomPlayer({
       <div className={`player-overlay-top ${showControls || playerError ? 'visible' : ''}`}>
         <div className="player-title-info">
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-            <span className={`player-mode-tag ${isStreamingOnly ? (isProxyActive ? 'mode-proxy' : 'mode-direct') : 'mode-offline'}`}>
-              {isStreamingOnly ? (isProxyActive ? 'Cloudflare Proxy' : 'Direct Browser Stream') : 'Offline Cached'}
+            <span className={`player-mode-tag ${(isHlsUrl(src) || isHlsUrl(directUrl)) ? 'mode-hls' : (isStreamingOnly ? (isProxyActive ? 'mode-proxy' : 'mode-direct') : 'mode-offline')}`}>
+              {(isHlsUrl(src) || isHlsUrl(directUrl))
+                ? (isProxyActive ? 'HLS Proxied Stream' : 'HLS Direct Stream')
+                : (isStreamingOnly ? (isProxyActive ? 'Cloudflare Proxy' : 'Direct Browser Stream') : 'Offline Cached')}
             </span>
 
             {isStreamingOnly && onSwitchSource && directUrl && proxyUrl && (

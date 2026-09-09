@@ -50,11 +50,97 @@ async function resolveStreamtapeDirectUrl(urlOrId, userAgent) {
       return directUrl;
     }
 
-    return null;
-  } catch (err) {
-    console.warn('Streamtape auto-resolution error:', err);
-    return null;
+// Helper to check if URL or Content-Type corresponds to an HLS M3U8 playlist
+function isM3u8Resource(url, contentType) {
+  try {
+    const cleanUrl = url.split('?')[0].toLowerCase();
+    if (cleanUrl.endsWith('.m3u8')) return true;
+  } catch (e) {}
+
+  if (contentType) {
+    const ct = contentType.toLowerCase();
+    if (
+      ct.includes('application/vnd.apple.mpegurl') ||
+      ct.includes('application/x-mpegurl') ||
+      ct.includes('audio/x-mpegurl') ||
+      ct.includes('vnd.apple.mpegurl')
+    ) {
+      return true;
+    }
   }
+  return false;
+}
+
+// Helper to determine media MIME type for binary chunks
+function getMediaContentType(url, upstreamContentType) {
+  try {
+    const cleanUrl = url.split('?')[0].toLowerCase();
+    if (cleanUrl.endsWith('.ts')) return 'video/MP2T';
+    if (cleanUrl.endsWith('.m4s') || cleanUrl.endsWith('.mp4')) return 'video/mp4';
+    if (cleanUrl.endsWith('.aac')) return 'audio/aac';
+    if (cleanUrl.endsWith('.vtt')) return 'text/vtt';
+    if (cleanUrl.endsWith('.key')) return 'application/octet-stream';
+  } catch (e) {}
+  return upstreamContentType || 'application/octet-stream';
+}
+
+// Helper to resolve any relative URL against a base manifest URL
+function resolveTargetUrl(relativeOrAbsolute, baseUrl) {
+  try {
+    return new URL(relativeOrAbsolute, baseUrl).toString();
+  } catch (e) {
+    return relativeOrAbsolute;
+  }
+}
+
+// Helper to construct a proxied URL
+function buildProxiedUrl(targetUrl, proxyEndpoint, options = {}) {
+  const params = new URLSearchParams();
+  params.set('url', targetUrl);
+  if (options.referer) params.set('referer', options.referer);
+  if (options.origin) params.set('origin', options.origin);
+  return `${proxyEndpoint}?${params.toString()}`;
+}
+
+// Rewrites an M3U8 playlist so all segment & sub-playlist URLs route through this worker proxy
+function rewriteM3u8Playlist(playlistText, manifestUrl, proxyEndpoint, options = {}) {
+  const lines = playlistText.split(/\r?\n/);
+  const rewrittenLines = [];
+  const uriAttrRegex = /URI=(["'])(.*?)\1/g;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) {
+      rewrittenLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith('#')) {
+      if (
+        line.startsWith('#EXT-X-KEY') ||
+        line.startsWith('#EXT-X-MAP') ||
+        line.startsWith('#EXT-X-MEDIA') ||
+        line.startsWith('#EXT-X-I-FRAME-STREAM-INF')
+      ) {
+        const rewrittenTag = line.replace(uriAttrRegex, (_match, quote, uri) => {
+          const resolved = resolveTargetUrl(uri, manifestUrl);
+          const proxied = buildProxiedUrl(resolved, proxyEndpoint, options);
+          return `URI=${quote}${proxied}${quote}`;
+        });
+        rewrittenLines.push(rewrittenTag);
+      } else {
+        rewrittenLines.push(line);
+      }
+      continue;
+    }
+
+    // Media segment URL or Sub-playlist URL
+    const resolvedMediaUrl = resolveTargetUrl(line, manifestUrl);
+    const proxiedMediaUrl = buildProxiedUrl(resolvedMediaUrl, proxyEndpoint, options);
+    rewrittenLines.push(proxiedMediaUrl);
+  }
+
+  return rewrittenLines.join('\n');
 }
 
 export default {
@@ -88,8 +174,13 @@ export default {
       });
     }
 
-    // 3. Extract target video URL query parameter robustly
+    // 3. Extract target video URL query parameter robustly (plain or base64)
     let videoUrl = url.searchParams.get("url");
+    if (!videoUrl && url.searchParams.get("b64url")) {
+      try {
+        videoUrl = atob(url.searchParams.get("b64url"));
+      } catch (e) {}
+    }
     if (!videoUrl) {
       const idx = request.url.indexOf("url=");
       if (idx !== -1) {
@@ -194,8 +285,13 @@ export default {
       return `Remote video host returned HTTP ${status} (${statusText || 'Error'}).`;
     }
 
-    // Smart Referer determination
+    // Smart Referer & Origin determination (supports plain or base64 overrides)
     let referer = url.searchParams.get("referer") || request.headers.get("x-referer");
+    if (!referer && url.searchParams.get("b64ref")) {
+      try {
+        referer = atob(url.searchParams.get("b64ref"));
+      } catch (e) {}
+    }
     if (!referer) {
       if (targetHost.includes("tapecontent.net") || targetHost.includes("streamtape")) {
         referer = "https://streamtape.com/";
@@ -206,6 +302,14 @@ export default {
       }
     }
 
+    let customOrigin = url.searchParams.get("origin") || request.headers.get("x-origin");
+    if (!customOrigin && url.searchParams.get("b64origin")) {
+      try {
+        customOrigin = atob(url.searchParams.get("b64origin"));
+      } catch (e) {}
+    }
+    const finalOrigin = customOrigin || targetOrigin;
+
     const defaultUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
 
     const forwardHeaders = new Headers();
@@ -214,7 +318,7 @@ export default {
     forwardHeaders.set("Accept-Language", "en-US,en;q=0.9");
     forwardHeaders.set("Accept-Encoding", "identity;q=1, *;q=0");
     if (referer) forwardHeaders.set("Referer", referer);
-    if (targetOrigin) forwardHeaders.set("Origin", targetOrigin);
+    if (finalOrigin) forwardHeaders.set("Origin", finalOrigin);
 
     // Forward client IP headers so upstream proxies behind CDNs receive client identity
     const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || request.headers.get("x-real-ip");
@@ -284,6 +388,24 @@ export default {
           }), {
             status: 200,
             headers: { "Content-Type": "application/json", ...corsHeaders }
+          });
+        }
+
+        // Check if remote resource is an HLS M3U8 playlist
+        if (isM3u8Resource(activeFetchUrl, contentType)) {
+          return new Response(JSON.stringify({
+            success: true,
+            contentLength: null,
+            contentType: "application/vnd.apple.mpegurl",
+            acceptRanges: false,
+            isHls: true,
+            resolvedUrl: activeFetchUrl !== videoUrl ? activeFetchUrl : undefined,
+            status: status
+          }), {
+            headers: {
+              "Content-Type": "application/json",
+              ...corsHeaders
+            }
           });
         }
 
@@ -363,6 +485,37 @@ export default {
         }
       }
 
+      const contentType = (videoResponse.headers.get("content-type") || "").toLowerCase();
+      const isPlaylist = isM3u8Resource(activeStreamUrl, contentType);
+
+      // =============================================================
+      // BRANCH A: M3U8 Playlist (Rewrite all nested segments)
+      // =============================================================
+      if (isPlaylist) {
+        const playlistText = await videoResponse.text();
+        const rewritten = rewriteM3u8Playlist(playlistText, activeStreamUrl, url.pathname, {
+          referer,
+          origin: finalOrigin
+        });
+
+        const playlistHeaders = new Headers();
+        for (const [key, val] of Object.entries(corsHeaders)) {
+          playlistHeaders.set(key, val);
+        }
+        playlistHeaders.set("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8");
+        playlistHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        playlistHeaders.set("Pragma", "no-cache");
+        playlistHeaders.set("Expires", "0");
+
+        return new Response(rewritten, {
+          status: 200,
+          headers: playlistHeaders
+        });
+      }
+
+      // =============================================================
+      // BRANCH B: Binary Media Chunks (.ts, .m4s, .mp4, .aac, .key)
+      // =============================================================
       // Prepare response headers for browser CORS and streaming
       const responseHeaders = new Headers();
       for (const [key, val] of Object.entries(corsHeaders)) {
@@ -384,6 +537,20 @@ export default {
         if (val) {
           responseHeaders.set(h, val);
         }
+      }
+
+      const finalContentType = getMediaContentType(activeStreamUrl, contentType);
+      responseHeaders.set("Content-Type", finalContentType);
+
+      // Binary media chunks are immutable; cache them aggressively
+      const cleanActiveUrl = activeStreamUrl.split('?')[0].toLowerCase();
+      if (
+        cleanActiveUrl.endsWith('.ts') ||
+        cleanActiveUrl.endsWith('.m4s') ||
+        cleanActiveUrl.endsWith('.aac') ||
+        cleanActiveUrl.endsWith('.key')
+      ) {
+        responseHeaders.set("Cache-Control", "public, max-age=3600, immutable");
       }
 
       // Ensure Accept-Ranges is exposed

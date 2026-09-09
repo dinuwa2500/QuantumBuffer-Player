@@ -76,6 +76,18 @@ export function classifyVideoUrl(url) {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();
 
+    const cleanPath = parsed.pathname.toLowerCase();
+    if (cleanPath.endsWith('.m3u8') || parsed.search.toLowerCase().includes('.m3u8')) {
+      return {
+        type: 'hls',
+        host,
+        label: 'Protected HLS Stream (.m3u8)',
+        isHls: true,
+        isProtected: true,
+        hint: 'Adaptive HTTP Live Streaming feed. Use "Play via Proxy" for hotlink bypass.'
+      };
+    }
+
     if (host.includes('sharepoint.com') || host.includes('1drv.ms') || host.includes('onedrive.live.com')) {
       return {
         type: 'sharepoint',
@@ -141,6 +153,13 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
   const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
 
   const hostClassification = classifyVideoUrl(cleanUrl);
+
+  if (hostClassification.isHls) {
+    throw new Error(
+      'HLS (.m3u8) feeds are dynamic multi-segment streams and cannot be cached into a single offline file. Click "Stream (Cloudflare Proxy)" or "Direct Stream" to play immediately!'
+    );
+  }
+
   let info = null;
   let useDirectDownload = false;
 

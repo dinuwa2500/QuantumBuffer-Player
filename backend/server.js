@@ -225,6 +225,19 @@ app.get('/api/info', async (req, res) => {
       });
     }
 
+    // Handle HLS M3U8 playlist detection
+    if (isM3u8Resource(activeUrl, contentType)) {
+      return res.json({
+        success: true,
+        contentLength: null,
+        contentType: 'application/vnd.apple.mpegurl',
+        acceptRanges: false,
+        isHls: true,
+        resolvedUrl: activeUrl !== videoUrl ? activeUrl : undefined,
+        status
+      });
+    }
+
     const isNonMedia = contentType.includes('text/html') || contentType.includes('application/json');
     if (isNonMedia) {
       let nonMediaHint = `Remote server returned non-video content (${contentType || 'HTML/JSON'}).`;
@@ -268,9 +281,110 @@ app.get('/api/info', async (req, res) => {
   }
 });
 
-// Proxy stream route
+// Helper to check if URL or Content-Type corresponds to an HLS M3U8 playlist
+function isM3u8Resource(url, contentType) {
+  try {
+    const cleanUrl = url.split('?')[0].toLowerCase();
+    if (cleanUrl.endsWith('.m3u8')) return true;
+  } catch (e) {}
+
+  if (contentType) {
+    const ct = contentType.toLowerCase();
+    if (
+      ct.includes('application/vnd.apple.mpegurl') ||
+      ct.includes('application/x-mpegurl') ||
+      ct.includes('audio/x-mpegurl') ||
+      ct.includes('vnd.apple.mpegurl')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Helper to determine media MIME type for binary chunks
+function getMediaContentType(url, upstreamContentType) {
+  try {
+    const cleanUrl = url.split('?')[0].toLowerCase();
+    if (cleanUrl.endsWith('.ts')) return 'video/MP2T';
+    if (cleanUrl.endsWith('.m4s') || cleanUrl.endsWith('.mp4')) return 'video/mp4';
+    if (cleanUrl.endsWith('.aac')) return 'audio/aac';
+    if (cleanUrl.endsWith('.vtt')) return 'text/vtt';
+    if (cleanUrl.endsWith('.key')) return 'application/octet-stream';
+  } catch (e) {}
+  return upstreamContentType || 'application/octet-stream';
+}
+
+// Helper to resolve any relative URL against a base manifest URL
+function resolveTargetUrl(relativeOrAbsolute, baseUrl) {
+  try {
+    return new URL(relativeOrAbsolute, baseUrl).toString();
+  } catch (e) {
+    return relativeOrAbsolute;
+  }
+}
+
+// Helper to construct a proxied URL
+function buildProxiedUrl(targetUrl, proxyEndpoint, options = {}) {
+  const params = new URLSearchParams();
+  params.set('url', targetUrl);
+  if (options.referer) params.set('referer', options.referer);
+  if (options.origin) params.set('origin', options.origin);
+  return `${proxyEndpoint}?${params.toString()}`;
+}
+
+// Rewrites an M3U8 playlist so all segment & sub-playlist URLs route through this proxy
+function rewriteM3u8Playlist(playlistText, manifestUrl, proxyEndpoint, options = {}) {
+  const lines = playlistText.split(/\r?\n/);
+  const rewrittenLines = [];
+  const uriAttrRegex = /URI=(["'])(.*?)\1/g;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) {
+      rewrittenLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith('#')) {
+      if (
+        line.startsWith('#EXT-X-KEY') ||
+        line.startsWith('#EXT-X-MAP') ||
+        line.startsWith('#EXT-X-MEDIA') ||
+        line.startsWith('#EXT-X-I-FRAME-STREAM-INF')
+      ) {
+        const rewrittenTag = line.replace(uriAttrRegex, (_match, quote, uri) => {
+          const resolved = resolveTargetUrl(uri, manifestUrl);
+          const proxied = buildProxiedUrl(resolved, proxyEndpoint, options);
+          return `URI=${quote}${proxied}${quote}`;
+        });
+        rewrittenLines.push(rewrittenTag);
+      } else {
+        rewrittenLines.push(line);
+      }
+      continue;
+    }
+
+    // Media segment URL or Sub-playlist URL
+    const resolvedMediaUrl = resolveTargetUrl(line, manifestUrl);
+    const proxiedMediaUrl = buildProxiedUrl(resolvedMediaUrl, proxyEndpoint, options);
+    rewrittenLines.push(proxiedMediaUrl);
+  }
+
+  return rewrittenLines.join('\n');
+}
+
+// Proxy stream route with HLS M3U8 rewriting & hotlink bypass
 app.get('/api/proxy', async (req, res) => {
   let videoUrl = req.query.url;
+
+  // Support base64 encoded URL
+  if (!videoUrl && req.query.b64url) {
+    try {
+      videoUrl = Buffer.from(req.query.b64url, 'base64').toString('utf-8');
+    } catch (e) {}
+  }
+
   if (!videoUrl) {
     const idx = req.originalUrl.indexOf('url=');
     if (idx !== -1) {
@@ -286,16 +400,40 @@ app.get('/api/proxy', async (req, res) => {
     return res.status(400).send('URL query parameter is required');
   }
 
+  // Extract optional referer / origin overrides (plain or base64)
+  let customReferer = req.query.referer || req.headers['x-referer'];
+  if (!customReferer && req.query.b64ref) {
+    try {
+      customReferer = Buffer.from(req.query.b64ref, 'base64').toString('utf-8');
+    } catch (e) {}
+  }
+
+  let customOrigin = req.query.origin || req.headers['x-origin'];
+  if (!customOrigin && req.query.b64origin) {
+    try {
+      customOrigin = Buffer.from(req.query.b64origin, 'base64').toString('utf-8');
+    } catch (e) {}
+  }
+
   const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
-  const referer = getSmartReferer(videoUrl, req.query.referer || req.headers['x-referer']);
+  const referer = getSmartReferer(videoUrl, customReferer);
+
+  let targetOrigin = customOrigin;
+  if (!targetOrigin) {
+    try {
+      targetOrigin = new URL(videoUrl).origin;
+    } catch (e) {}
+  }
 
   try {
     const forwardHeaders = {
       'User-Agent': userAgent,
       'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
       'Accept-Encoding': 'identity;q=1, *;q=0'
     };
     if (referer) forwardHeaders['Referer'] = referer;
+    if (targetOrigin) forwardHeaders['Origin'] = targetOrigin;
     if (req.headers.range) {
       forwardHeaders['Range'] = req.headers.range;
     }
@@ -325,23 +463,62 @@ app.get('/api/proxy', async (req, res) => {
       }
     }
 
+    const contentType = response.headers.get('content-type') || '';
+    const isPlaylist = isM3u8Resource(activeUrl, contentType);
+
     const responseHeaders = {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+      'Access-Control-Allow-Headers': 'Range, Content-Type, Authorization, X-Requested-With, Origin, Accept, X-Referer, X-Origin',
       'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, Content-Type, Content-Disposition',
     };
 
-    const contentType = response.headers.get('content-type');
+    // =========================================================================
+    // BRANCH A: M3U8 Playlist (Parse & Rewrite all nested segment / sub-manifest URLs)
+    // =========================================================================
+    if (isPlaylist) {
+      const playlistText = await response.text();
+      const proxyEndpoint = '/api/proxy';
+
+      const rewritten = rewriteM3u8Playlist(playlistText, activeUrl, proxyEndpoint, {
+        referer,
+        origin: targetOrigin
+      });
+
+      responseHeaders['Content-Type'] = 'application/vnd.apple.mpegurl; charset=utf-8';
+      responseHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+      responseHeaders['Pragma'] = 'no-cache';
+      responseHeaders['Expires'] = '0';
+
+      res.writeHead(200, responseHeaders);
+      return res.end(rewritten);
+    }
+
+    // =========================================================================
+    // BRANCH B: Binary Media Chunks (.ts, .m4s, .mp4, .aac, keys)
+    // =========================================================================
+    const finalContentType = getMediaContentType(activeUrl, contentType);
     const contentLength = response.headers.get('content-length');
     const contentRange = response.headers.get('content-range');
     const acceptRanges = response.headers.get('accept-ranges');
     const contentDisposition = response.headers.get('content-disposition');
 
-    if (contentType) responseHeaders['Content-Type'] = contentType;
+    if (finalContentType) responseHeaders['Content-Type'] = finalContentType;
     if (contentLength) responseHeaders['Content-Length'] = contentLength;
     if (contentRange) responseHeaders['Content-Range'] = contentRange;
     if (acceptRanges) responseHeaders['Accept-Ranges'] = acceptRanges;
     if (contentDisposition) responseHeaders['Content-Disposition'] = contentDisposition;
+
+    // Binary media chunks are immutable and can be safely cached for 1 hour
+    const cleanActiveUrl = activeUrl.split('?')[0].toLowerCase();
+    if (
+      cleanActiveUrl.endsWith('.ts') ||
+      cleanActiveUrl.endsWith('.m4s') ||
+      cleanActiveUrl.endsWith('.aac') ||
+      cleanActiveUrl.endsWith('.key')
+    ) {
+      responseHeaders['Cache-Control'] = 'public, max-age=3600, immutable';
+    }
 
     if (!responseHeaders['Accept-Ranges'] && (response.status === 206 || contentRange)) {
       responseHeaders['Accept-Ranges'] = 'bytes';

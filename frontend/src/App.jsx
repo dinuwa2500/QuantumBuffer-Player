@@ -56,6 +56,9 @@ export default function App() {
   const [library, setLibrary] = useState([]);
   const [activeVideo, setActiveVideo] = useState(null);
   const [showGuideModal, setShowGuideModal] = useState(false);
+  const [customReferer, setCustomReferer] = useState('');
+  const [customOrigin, setCustomOrigin] = useState('');
+  const [showAdvancedHeaders, setShowAdvancedHeaders] = useState(false);
   
   const abortControllerRef = useRef(null);
   const isPlayerPlayingRef = useRef(false);
@@ -161,6 +164,14 @@ export default function App() {
     const cleanUrl = preprocessVideoUrl(videoUrl);
     const classification = classifyVideoUrl(cleanUrl);
 
+    // If an HLS stream is detected, buffer mode is not applicable (it is a segmented live stream).
+    // Automatically transition to instant proxy stream mode!
+    if (classification.isHls || cleanUrl.toLowerCase().includes('.m3u8')) {
+      setStatusMessage('HLS stream detected! Initiating instant proxy stream playback...');
+      handleDirectStream(null, true);
+      return;
+    }
+
     // Reset states
     setIsBuffering(true);
     setErrorMessage('');
@@ -173,7 +184,13 @@ export default function App() {
     const title = getTitleFromUrl(cleanUrl);
     const id = 'vid_' + Date.now();
     const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
+    let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
+    if (customReferer && customReferer.trim()) {
+      proxyUrl += `&referer=${encodeURIComponent(customReferer.trim())}`;
+    }
+    if (customOrigin && customOrigin.trim()) {
+      proxyUrl += `&origin=${encodeURIComponent(customOrigin.trim())}`;
+    }
 
     // Play direct or proxy stream immediately while caching
     setActiveVideo({
@@ -256,13 +273,24 @@ export default function App() {
     if (!videoUrl.trim()) return;
 
     const cleanUrl = preprocessVideoUrl(videoUrl);
+    const isHls = cleanUrl.toLowerCase().includes('.m3u8') || (activeClassification && activeClassification.isHls);
     setErrorMessage('');
-    setStatusMessage(useProxy ? 'Loading stream via Cloudflare Worker...' : 'Loading direct browser stream (Your IP)...');
+    setStatusMessage(
+      useProxy
+        ? (isHls ? 'Connecting HLS stream via Reverse Proxy...' : 'Loading stream via Proxy...')
+        : 'Loading direct browser stream (Your IP)...'
+    );
 
     const title = getTitleFromUrl(cleanUrl);
     const id = 'stream_' + Date.now();
     const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
+    let proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
+    if (customReferer && customReferer.trim()) {
+      proxyUrl += `&referer=${encodeURIComponent(customReferer.trim())}`;
+    }
+    if (customOrigin && customOrigin.trim()) {
+      proxyUrl += `&origin=${encodeURIComponent(customOrigin.trim())}`;
+    }
     const streamSrc = useProxy ? proxyUrl : cleanUrl;
 
     setActiveVideo({
@@ -272,11 +300,15 @@ export default function App() {
       directUrl: cleanUrl,
       proxyUrl: proxyUrl,
       isStreamingOnly: true,
-      streamMode: useProxy ? 'Cloudflare Proxy' : 'Direct Browser Stream'
+      streamMode: useProxy ? (isHls ? 'HLS Reverse Proxy' : 'Cloudflare Proxy') : 'Direct Browser Stream'
     });
 
     setVideoUrl('');
-    setStatusMessage(useProxy ? 'Streaming via Cloudflare Proxy.' : 'Streaming directly from source (Your IP).');
+    setStatusMessage(
+      useProxy
+        ? (isHls ? 'Streaming protected HLS feed via Reverse Proxy.' : 'Streaming via Cloudflare Proxy.')
+        : 'Streaming directly from source (Your IP).'
+    );
 
     setTimeout(() => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -445,7 +477,7 @@ export default function App() {
               <div className="input-container">
                 <input
                   type="url"
-                  placeholder="Paste direct MP4, Streamtape, or Cloud Drive video link..."
+                  placeholder="Paste direct MP4, HLS (.m3u8), Streamtape, or Cloud video link..."
                   value={videoUrl}
                   onChange={(e) => setVideoUrl(e.target.value)}
                   disabled={isBuffering}
@@ -453,6 +485,88 @@ export default function App() {
                   className="input-field"
                 />
               </div>
+
+              {/* Presets & Header Toggle Row */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', margin: '0.4rem 0' }}>
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVideoUrl('https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8');
+                      setCustomReferer('https://mux.com/');
+                      setCustomOrigin('https://mux.com');
+                    }}
+                    className="btn-secondary"
+                    style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem', borderRadius: '6px' }}
+                    title="Load a sample HLS stream with referer headers"
+                  >
+                    Load HLS (.m3u8) Demo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVideoUrl('https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4');
+                      setCustomReferer('');
+                      setCustomOrigin('');
+                    }}
+                    className="btn-secondary"
+                    style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem', borderRadius: '6px' }}
+                    title="Load standard Big Buck Bunny MP4 video"
+                  >
+                    Load MP4 Demo
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedHeaders(!showAdvancedHeaders)}
+                  className="btn-secondary"
+                  style={{ padding: '0.2rem 0.55rem', fontSize: '0.72rem', borderRadius: '6px', color: (customReferer || customOrigin) ? '#22d3ee' : 'inherit' }}
+                >
+                  {showAdvancedHeaders ? '▲ Hide Headers' : '▼ Spoof Headers (Referer/Origin)'}
+                </button>
+              </div>
+
+              {/* Expandable Referer & Origin Headers Section */}
+              {showAdvancedHeaders && (
+                <div style={{
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  borderRadius: '8px',
+                  padding: '0.75rem',
+                  marginBottom: '0.5rem',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                  gap: '0.6rem'
+                }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '0.25rem' }}>
+                      Required Referer Header (Optional):
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. https://authorized-site.com/"
+                      value={customReferer}
+                      onChange={(e) => setCustomReferer(e.target.value)}
+                      className="input-field"
+                      style={{ fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '0.25rem' }}>
+                      Required Origin Header (Optional):
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. https://authorized-site.com"
+                      value={customOrigin}
+                      onChange={(e) => setCustomOrigin(e.target.value)}
+                      className="input-field"
+                      style={{ fontSize: '0.8rem', padding: '0.4rem 0.6rem' }}
+                    />
+                  </div>
+                </div>
+              )}
 
               {/* Host Classification Badge */}
               {activeClassification && activeClassification.type !== 'invalid' && (

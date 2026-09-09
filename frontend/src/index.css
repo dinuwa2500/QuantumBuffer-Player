@@ -820,6 +820,10 @@ h1, h2, h3, h4, h5, h6 {
   color: #38bdf8;
 }
 
+.player-mode-tag.mode-hls {
+  color: #10b981;
+}
+
 .player-mode-tag.mode-offline {
   color: #a78bfa;
 }
