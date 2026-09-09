@@ -45,7 +45,8 @@ export default function CustomPlayer({
   directUrl,
   proxyUrl,
   streamMode,
-  onSwitchSource
+  onSwitchSource,
+  onOpenGuide
 }) {
   const videoRef = useRef(null);
   const containerRef = useRef(null);
@@ -98,6 +99,24 @@ export default function CustomPlayer({
     return `${minutes}:${pad(seconds)}`;
   };
 
+  // Helper to diagnose target URL host
+  const getHostFromUrl = (urlStr) => {
+    if (!urlStr) return '';
+    try {
+      // If it's a proxy url, extract the inner url
+      if (urlStr.includes('url=')) {
+        const match = urlStr.match(/url=([^&]+)/);
+        if (match) {
+          const inner = decodeURIComponent(match[1]);
+          return new URL(inner).hostname.toLowerCase();
+        }
+      }
+      return new URL(urlStr).hostname.toLowerCase();
+    } catch (e) {
+      return '';
+    }
+  };
+
   // Toggle Play / Pause
   const togglePlay = () => {
     if (!videoRef.current) return;
@@ -111,7 +130,14 @@ export default function CustomPlayer({
       videoRef.current.play().catch(err => {
         console.warn('Playback failed:', err);
         if (err.name === 'NotSupportedError' || err.name === 'DOMException') {
-          setPlayerError('Media resource not suitable or stream blocked by remote host (HTTP 403 / Expired link).');
+          const host = getHostFromUrl(directUrl || src);
+          if (host.includes('sharepoint.com') || host.includes('1drv.ms')) {
+            setPlayerError('Microsoft SharePoint / OneDrive access restricted. This file requires your SLIIT / Microsoft 365 login or direct media stream capture.');
+          } else if (host.includes('tapecontent.net') || host.includes('streamtape.com')) {
+            setPlayerError('Streamtape links are bound to your browser\'s IP address. Click "Play Direct Stream (Your IP)" below.');
+          } else {
+            setPlayerError('Media resource could not be played. The remote host may require login authentication or has blocked cross-origin requests.');
+          }
         }
       });
     }
@@ -120,7 +146,9 @@ export default function CustomPlayer({
   // Handle Video Error Event
   const handleVideoError = (e) => {
     const mediaError = videoRef.current ? videoRef.current.error : null;
+    const host = getHostFromUrl(directUrl || src);
     let message = 'Unable to play video resource.';
+
     if (mediaError) {
       switch (mediaError.code) {
         case 1:
@@ -133,8 +161,14 @@ export default function CustomPlayer({
           message = 'Decode error: The video file is corrupted or formatted with an unsupported codec.';
           break;
         case 4:
-          if (src && src.includes('/api/proxy')) {
-            message = 'Cloudflare proxy received HTTP 403 Forbidden. This video host (Streamtape / Tapecontent) binds links to your browser IP address.';
+          if (host.includes('sharepoint.com') || host.includes('1drv.ms') || host.includes('onedrive.live.com')) {
+            message = 'Microsoft SharePoint / OneDrive access restricted (HTTP 403 / Login required). Institutional recordings require SLIIT / Microsoft SSO authorization or a direct media stream URL.';
+          } else if (host.includes('drive.google.com')) {
+            message = 'Google Drive access denied. Ensure link sharing is set to "Anyone with the link can view".';
+          } else if (host.includes('tapecontent.net') || host.includes('streamtape.com')) {
+            message = 'Streamtape links are locked to your browser\'s IP address. Click "Play Direct Stream (Your IP)" below to watch.';
+          } else if (src && src.includes('/api/proxy')) {
+            message = 'Remote video server rejected the proxy request or returned an HTML error/login page instead of video data.';
           } else {
             message = 'Media format not supported or remote server returned an error (e.g. HTTP 403 / expired token).';
           }
@@ -449,7 +483,36 @@ export default function CustomPlayer({
             {playerError}
           </p>
           <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'center' }}>
-            {isProxyActive && directUrl && onSwitchSource && (
+            {/* Contextual actions based on detected host */}
+            {(getHostFromUrl(directUrl || src).includes('sharepoint.com') || getHostFromUrl(directUrl || src).includes('1drv.ms')) && (
+              <>
+                {onOpenGuide && (
+                  <button
+                    onClick={onOpenGuide}
+                    className="btn-primary"
+                    style={{ padding: '0.5rem 1.25rem' }}
+                  >
+                    <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ marginRight: '0.35rem' }}>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    How to Stream SharePoint
+                  </button>
+                )}
+                {directUrl && (
+                  <a
+                    href={directUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn-secondary"
+                    style={{ padding: '0.5rem 1.25rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+                  >
+                    Open Link in New Tab
+                  </a>
+                )}
+              </>
+            )}
+
+            {isProxyActive && directUrl && onSwitchSource && !getHostFromUrl(directUrl).includes('sharepoint.com') && (
               <button
                 onClick={() => onSwitchSource('direct')}
                 className="btn-primary"
@@ -458,7 +521,8 @@ export default function CustomPlayer({
                 <PlayIcon /> Play Direct Stream (Your IP)
               </button>
             )}
-            {!isProxyActive && proxyUrl && onSwitchSource && (
+
+            {!isProxyActive && proxyUrl && onSwitchSource && !getHostFromUrl(directUrl).includes('sharepoint.com') && (
               <button
                 onClick={() => onSwitchSource('proxy')}
                 className="btn-primary"
@@ -467,6 +531,7 @@ export default function CustomPlayer({
                 <PlayIcon /> Try Cloudflare Proxy Stream
               </button>
             )}
+
             <button onClick={handleRetry} className="btn-secondary" style={{ padding: '0.5rem 1.25rem' }}>
               <RefreshIcon /> Retry
             </button>

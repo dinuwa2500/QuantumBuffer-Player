@@ -108,6 +108,39 @@ export default {
       });
     }
 
+    // URL auto-normalization (Google Drive, Dropbox, SharePoint, etc.)
+    function normalizeVideoUrl(rawUrl) {
+      try {
+        const u = new URL(rawUrl);
+        // Google Drive /file/d/ID/view -> direct export
+        if (u.hostname.includes('drive.google.com')) {
+          const m = u.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/i);
+          if (m) {
+            return `https://drive.google.com/uc?export=download&id=${m[1]}`;
+          }
+        }
+        // Dropbox dl=0 -> dl=1
+        if (u.hostname.includes('dropbox.com')) {
+          if (u.searchParams.get('dl') === '0') {
+            u.searchParams.set('dl', '1');
+            return u.toString();
+          }
+        }
+        // SharePoint sharing /:v:/g/ without download=1
+        if (u.hostname.includes('sharepoint.com') && (u.pathname.includes('/:v:/') || u.pathname.includes('/:u:/'))) {
+          if (!u.searchParams.has('download')) {
+            u.searchParams.set('download', '1');
+            return u.toString();
+          }
+        }
+        return rawUrl;
+      } catch (e) {
+        return rawUrl;
+      }
+    }
+
+    videoUrl = normalizeVideoUrl(videoUrl);
+
     // Parse target origin and hostname for smart headers
     let targetOrigin = "";
     let targetHost = "";
@@ -120,6 +153,45 @@ export default {
         status: 400,
         headers: { "Content-Type": "application/json", ...corsHeaders }
       });
+    }
+
+    // Helper to generate precise, host-aware error messages
+    function getHostErrorHint(status, statusText, headers, host) {
+      const isSharePoint = host.includes("sharepoint.com") || host.includes("1drv.ms") || host.includes("onedrive.live.com");
+      const isStreamtape = host.includes("tapecontent.net") || host.includes("streamtape.com");
+      const isGDrive = host.includes("drive.google.com");
+      const isDood = host.includes("dood") || host.includes("ds2play");
+
+      if (isSharePoint) {
+        if (status === 403 || status === 401) {
+          return `Microsoft SharePoint / OneDrive access restricted (HTTP ${status}). This file requires SLIIT / Microsoft 365 login credentials or a public guest link. Check our SharePoint Guide for how to capture the direct stream.`;
+        }
+        return `Microsoft SharePoint returned HTTP ${status}. Verify the link is accessible.`;
+      }
+
+      if (isStreamtape) {
+        if (status === 403) {
+          return "Streamtape links are locked to your browser's IP address. Click 'Stream (Your IP)' to watch directly.";
+        }
+      }
+
+      if (isGDrive) {
+        if (status === 403 || status === 401) {
+          return "Google Drive access denied. Ensure the file sharing is set to 'Anyone with the link' or file download quota hasn't been exceeded.";
+        }
+      }
+
+      if (isDood && status === 403) {
+        return "Doodstream link access expired or blocked. Please obtain a fresh direct stream URL.";
+      }
+
+      if (status === 403) {
+        return `Remote server returned HTTP 403 Forbidden. Access to this resource is restricted or token has expired.`;
+      }
+      if (status === 404) {
+        return `Remote video host returned HTTP 404. File not found at the specified URL.`;
+      }
+      return `Remote video host returned HTTP ${status} (${statusText || 'Error'}).`;
     }
 
     // Smart Referer determination
@@ -202,16 +274,12 @@ export default {
 
         // Check if remote host returned an error status (4xx/5xx)
         if (status >= 400) {
-          let errorHint = `Remote video host returned HTTP ${status} (${response.statusText || 'Error'}).`;
-          if (status === 403) {
-            errorHint += " Access forbidden: Streamtape links are locked to your browser's IP. Use 'Stream (Your IP)' to watch directly.";
-          } else if (status === 404) {
-            errorHint += " Video file not found at the specified URL.";
-          }
+          const errorHint = getHostErrorHint(status, response.statusText, response.headers, targetHost);
           return new Response(JSON.stringify({
             success: false,
             error: errorHint,
             status: status,
+            host: targetHost,
             contentType: contentType
           }), {
             status: 200,
@@ -222,10 +290,18 @@ export default {
         // Check if response is non-media HTML or JSON error page
         const isNonMedia = contentType.includes("text/html") || contentType.includes("application/json");
         if (isNonMedia) {
+          let nonMediaHint = `Remote server returned non-video content (${contentType || 'HTML/JSON'}).`;
+          if (targetHost.includes("sharepoint.com") || targetHost.includes("1drv.ms")) {
+            nonMediaHint = "SharePoint returned a web login page (HTML) instead of raw video stream. The video requires your institutional login or a direct media stream URL.";
+          } else {
+            nonMediaHint += " The URL might be a webpage, login screen, captcha, or expired token response rather than a direct MP4 stream.";
+          }
+
           return new Response(JSON.stringify({
             success: false,
-            error: `Remote server returned non-video content (${contentType || 'HTML/JSON'}). The URL might be a webpage, captcha, or expired token response rather than a direct MP4 stream.`,
+            error: nonMediaHint,
             status: 415,
+            host: targetHost,
             contentType: contentType
           }), {
             status: 200,

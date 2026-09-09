@@ -22,6 +22,110 @@ export function formatETA(seconds) {
 }
 
 /**
+ * Automatically transforms popular cloud sharing URLs into direct streamable/downloadable endpoints.
+ */
+export function preprocessVideoUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
+  const trimmed = rawUrl.trim();
+
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+
+    // 1. Google Drive view URLs
+    // E.g.: https://drive.google.com/file/d/1A2B3C4D5E/view?usp=sharing
+    if (host.includes('drive.google.com')) {
+      const match = parsed.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/i);
+      if (match) {
+        return `https://drive.google.com/uc?export=download&id=${match[1]}`;
+      }
+    }
+
+    // 2. Dropbox share URLs
+    // E.g.: https://www.dropbox.com/s/xyz123/video.mp4?dl=0
+    if (host.includes('dropbox.com')) {
+      if (parsed.searchParams.get('dl') === '0') {
+        parsed.searchParams.set('dl', '1');
+        return parsed.toString();
+      }
+    }
+
+    // 3. SharePoint & OneDrive preview URLs
+    // E.g.: https://tenant.sharepoint.com/:v:/g/personal/...
+    if (host.includes('sharepoint.com') || host.includes('1drv.ms') || host.includes('onedrive.live.com')) {
+      if (parsed.pathname.includes('/:v:/') || parsed.pathname.includes('/:u:/')) {
+        if (!parsed.searchParams.has('download')) {
+          parsed.searchParams.set('download', '1');
+          return parsed.toString();
+        }
+      }
+    }
+
+    return trimmed;
+  } catch (e) {
+    return trimmed;
+  }
+}
+
+/**
+ * Classifies a video URL to determine host characteristics and troubleshooting tips.
+ */
+export function classifyVideoUrl(url) {
+  if (!url) return { type: 'unknown', host: '', isProtected: false };
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+
+    if (host.includes('sharepoint.com') || host.includes('1drv.ms') || host.includes('onedrive.live.com')) {
+      return {
+        type: 'sharepoint',
+        host,
+        label: 'Microsoft SharePoint / OneDrive',
+        isProtected: true,
+        hint: 'Requires SLIIT / Microsoft 365 login or direct media stream capture.'
+      };
+    }
+    if (host.includes('drive.google.com')) {
+      return {
+        type: 'gdrive',
+        host,
+        label: 'Google Drive',
+        isProtected: true,
+        hint: 'Ensure link sharing is set to "Anyone with the link".'
+      };
+    }
+    if (host.includes('tapecontent.net') || host.includes('streamtape.com')) {
+      return {
+        type: 'streamtape',
+        host,
+        label: 'Streamtape',
+        isProtected: false,
+        hint: 'Links are bound to client IP. Use Direct Stream (Your IP).'
+      };
+    }
+    if (host.includes('dood') || host.includes('ds2play')) {
+      return {
+        type: 'dood',
+        host,
+        label: 'Doodstream',
+        isProtected: false,
+        hint: 'Uses short-lived session tokens.'
+      };
+    }
+
+    return {
+      type: 'direct',
+      host,
+      label: host || 'Direct Video Link',
+      isProtected: false,
+      hint: 'Direct HTTP/HTTPS video stream.'
+    };
+  } catch (e) {
+    return { type: 'invalid', host: '', isProtected: false };
+  }
+}
+
+/**
  * Buffers a video from a URL through proxy or direct browser connection.
  * 
  * @param {string} videoUrl Original MP4 url
@@ -31,10 +135,12 @@ export function formatETA(seconds) {
  * @param {AbortSignal} options.signal AbortController signal for cancellation
  */
 export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal }) {
+  const cleanUrl = preprocessVideoUrl(videoUrl);
   const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-  const encodedUrl = encodeURIComponent(videoUrl);
+  const encodedUrl = encodeURIComponent(cleanUrl);
   const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodedUrl}`;
 
+  const hostClassification = classifyVideoUrl(cleanUrl);
   let info = null;
   let useDirectDownload = false;
 
@@ -49,10 +155,10 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
     console.warn('Proxy metadata probe failed:', err);
   }
 
-  // 2. If proxy was blocked by remote host (e.g. 403 IP-lock on Streamtape / Tapecontent), try direct browser probe
+  // 2. If proxy was blocked or returned error, try direct browser probe
   if (!info || info.success === false) {
     try {
-      const directRes = await fetch(videoUrl, {
+      const directRes = await fetch(cleanUrl, {
         method: 'GET',
         headers: { Range: 'bytes=0-0' },
         signal
@@ -79,8 +185,21 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
       }
     } catch (directErr) {
       if (directErr.name === 'AbortError') throw directErr;
-      const proxyErrorMsg = info?.error || 'Video host rejected server connection.';
-      throw new Error(`${proxyErrorMsg} Streamtape / Tapecontent links are IP-locked. Please click 'Stream (Your IP)' to watch immediately.`);
+      
+      // Construct accurate context-aware error message
+      if (info && info.error) {
+        throw new Error(info.error);
+      }
+
+      if (hostClassification.type === 'sharepoint') {
+        throw new Error('Microsoft SharePoint / OneDrive access restricted (HTTP 403). This recording requires SLIIT / Microsoft SSO authentication. Please check our SharePoint Guide for how to capture the direct stream.');
+      } else if (hostClassification.type === 'streamtape') {
+        throw new Error('Streamtape links are locked to your browser\'s IP address. Please click "Stream (Your IP)" to watch directly.');
+      } else if (hostClassification.type === 'gdrive') {
+        throw new Error('Google Drive access was blocked. Verify the file sharing is set to "Anyone with the link can view".');
+      } else {
+        throw new Error('Failed to connect to video server. The remote host may require login authentication or has blocked cross-origin requests.');
+      }
     }
   }
 
@@ -88,7 +207,7 @@ export async function bufferVideo(videoUrl, { onProgress, checkThrottle, signal 
     throw new Error(info?.error || 'Video host rejected the request.');
   }
 
-  const downloadEndpoint = useDirectDownload ? videoUrl : proxyUrl;
+  const downloadEndpoint = useDirectDownload ? cleanUrl : proxyUrl;
   const totalBytes = info.contentLength;
   const contentType = info.contentType || 'video/mp4';
   const acceptRanges = info.acceptRanges;

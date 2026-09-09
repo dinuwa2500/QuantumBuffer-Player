@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initDB, saveVideo, getVideosList, getVideoBlob, deleteVideo, clearAllCache } from './utils/db';
-import { bufferVideo, formatBytes } from './utils/downloader';
+import { bufferVideo, formatBytes, preprocessVideoUrl, classifyVideoUrl } from './utils/downloader';
 import CustomPlayer from './components/CustomPlayer';
 
 // Clean icons with controlled size classes
@@ -35,6 +35,18 @@ const InfoIcon = () => (
   </svg>
 );
 
+const UploadIcon = () => (
+  <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+  </svg>
+);
+
+const BookOpenIcon = () => (
+  <svg className="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+  </svg>
+);
+
 export default function App() {
   const [videoUrl, setVideoUrl] = useState('');
   const [isBuffering, setIsBuffering] = useState(false);
@@ -43,10 +55,12 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState('');
   const [library, setLibrary] = useState([]);
   const [activeVideo, setActiveVideo] = useState(null);
+  const [showGuideModal, setShowGuideModal] = useState(false);
   
   const abortControllerRef = useRef(null);
   const isPlayerPlayingRef = useRef(false);
   const activeVideoRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // Sync activeVideo to ref for downloader access
   useEffect(() => {
@@ -87,8 +101,12 @@ export default function App() {
       const parsed = new URL(url);
       const pathname = parsed.pathname;
       const lastSegment = pathname.substring(pathname.lastIndexOf('/') + 1);
-      if (lastSegment && lastSegment.includes('.')) {
+      if (lastSegment && lastSegment.includes('.') && !lastSegment.includes('=')) {
         return decodeURIComponent(lastSegment);
+      }
+      if (parsed.hostname.includes('sharepoint.com')) {
+        const uniqueId = parsed.searchParams.get('UniqueId');
+        return uniqueId ? `SharePoint Recording (${uniqueId.substring(0, 8)})` : 'SharePoint Video';
       }
       return parsed.hostname + ' Video';
     } catch (e) {
@@ -96,9 +114,52 @@ export default function App() {
     }
   };
 
+  // Handle local video file import (e.g. downloaded SLIIT SharePoint recording)
+  const handleImportLocalFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setStatusMessage(`Importing ${file.name} to local database...`);
+      const id = 'local_' + Date.now();
+      const title = file.name;
+      const size = file.size;
+      const contentType = file.type || 'video/mp4';
+
+      await saveVideo(id, `local://${file.name}`, title, file, size, contentType);
+      await fetchLibrary();
+
+      // Immediately play the imported video
+      const localBlobUrl = URL.createObjectURL(file);
+      setActiveVideo({
+        id,
+        title,
+        blobUrl: localBlobUrl,
+        isStreamingOnly: false,
+        size,
+        contentType
+      });
+
+      setStatusMessage(`"${title}" imported successfully to local cache!`);
+      setTimeout(() => setStatusMessage(''), 3000);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err) {
+      console.error('Import error:', err);
+      setErrorMessage(`Failed to import local video: ${err.message}`);
+      setStatusMessage('');
+    } finally {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
   const handleStartBuffer = async (e) => {
     e.preventDefault();
     if (!videoUrl.trim()) return;
+
+    const cleanUrl = preprocessVideoUrl(videoUrl);
+    const classification = classifyVideoUrl(cleanUrl);
 
     // Reset states
     setIsBuffering(true);
@@ -109,17 +170,17 @@ export default function App() {
     // Create new abort controller
     abortControllerRef.current = new AbortController();
 
-    const title = getTitleFromUrl(videoUrl);
+    const title = getTitleFromUrl(cleanUrl);
     const id = 'vid_' + Date.now();
     const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(videoUrl)}`;
+    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
 
     // Play direct or proxy stream immediately while caching
     setActiveVideo({
       id,
       title,
-      blobUrl: videoUrl,
-      directUrl: videoUrl,
+      blobUrl: cleanUrl,
+      directUrl: cleanUrl,
       proxyUrl: proxyUrl,
       isStreamingOnly: false
     });
@@ -127,7 +188,7 @@ export default function App() {
     try {
       setStatusMessage('Buffering stream to browser cache...');
       
-      const result = await bufferVideo(videoUrl, {
+      const result = await bufferVideo(cleanUrl, {
         onProgress: (progressData) => {
           setProgress(progressData);
         },
@@ -143,7 +204,7 @@ export default function App() {
       });
 
       setStatusMessage('Saving to local database...');
-      await saveVideo(id, videoUrl, title, result.blob, result.size, result.contentType);
+      await saveVideo(id, cleanUrl, title, result.blob, result.size, result.contentType);
       
       setStatusMessage('Saved successfully!');
       setVideoUrl('');
@@ -181,6 +242,9 @@ export default function App() {
       } else {
         console.error('Buffering error:', err);
         setErrorMessage(err.message || 'Failed to buffer video. Make sure the link is a valid direct MP4 URL.');
+        if (classification.type === 'sharepoint') {
+          setShowGuideModal(true);
+        }
       }
       setIsBuffering(false);
       setProgress(null);
@@ -191,20 +255,21 @@ export default function App() {
     if (e) e.preventDefault();
     if (!videoUrl.trim()) return;
 
+    const cleanUrl = preprocessVideoUrl(videoUrl);
     setErrorMessage('');
     setStatusMessage(useProxy ? 'Loading stream via Cloudflare Worker...' : 'Loading direct browser stream (Your IP)...');
 
-    const title = getTitleFromUrl(videoUrl);
+    const title = getTitleFromUrl(cleanUrl);
     const id = 'stream_' + Date.now();
     const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(videoUrl)}`;
-    const streamSrc = useProxy ? proxyUrl : videoUrl;
+    const proxyUrl = `${backendBaseUrl}/api/proxy?url=${encodeURIComponent(cleanUrl)}`;
+    const streamSrc = useProxy ? proxyUrl : cleanUrl;
 
     setActiveVideo({
       id,
       title,
       blobUrl: streamSrc,
-      directUrl: videoUrl,
+      directUrl: cleanUrl,
       proxyUrl: proxyUrl,
       isStreamingOnly: true,
       streamMode: useProxy ? 'Cloudflare Proxy' : 'Direct Browser Stream'
@@ -309,9 +374,19 @@ export default function App() {
   };
 
   const totalCachedSize = library.reduce((acc, curr) => acc + (curr.size || 0), 0);
+  const activeClassification = videoUrl ? classifyVideoUrl(videoUrl) : null;
 
   return (
     <div className="app-container">
+      {/* Hidden File Input for Local Video Import */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleImportLocalFile}
+        accept="video/mp4,video/webm,video/mkv,video/x-matroska,video/quicktime"
+        style={{ display: 'none' }}
+      />
+
       {/* Top Header */}
       <header className="app-header">
         <div className="app-title-group">
@@ -324,13 +399,24 @@ export default function App() {
           </p>
         </div>
 
-        {library.length > 0 && (
-          <div className="library-summary-badge">
-            <span>Library: {library.length} videos</span>
-            <span className="library-summary-divider">|</span>
-            <span className="library-summary-size">{formatBytes(totalCachedSize)}</span>
-          </div>
-        )}
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setShowGuideModal(true)}
+            className="btn-secondary"
+            style={{ padding: '0.45rem 0.85rem', fontSize: '0.8rem' }}
+            title="How to stream protected SharePoint, SLIIT lecture recordings, and Cloud Drive files"
+          >
+            <BookOpenIcon /> SharePoint & Cloud Guide
+          </button>
+
+          {library.length > 0 && (
+            <div className="library-summary-badge">
+              <span>Library: {library.length} videos</span>
+              <span className="library-summary-divider">|</span>
+              <span className="library-summary-size">{formatBytes(totalCachedSize)}</span>
+            </div>
+          )}
+        </div>
       </header>
 
       {/* Main Grid Section */}
@@ -341,15 +427,25 @@ export default function App() {
           
           {/* Input Panel */}
           <div className="glass-panel">
-            <h2 className="panel-header">
-              <LinkIcon /> Buffer / Stream Video
-            </h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1rem' }}>
+              <h2 className="panel-header" style={{ marginBottom: 0 }}>
+                <LinkIcon /> Buffer / Stream Video
+              </h2>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="btn-import-file"
+                title="Import downloaded lecture video from your PC for zero-buffering offline playback"
+              >
+                <UploadIcon /> Import Local Video (.mp4 / .webm)
+              </button>
+            </div>
             
             <form onSubmit={handleStartBuffer} className="buffer-form">
               <div className="input-container">
                 <input
                   type="url"
-                  placeholder="Paste direct MP4 video link (e.g. Streamtape, tapecontent, or direct .mp4)"
+                  placeholder="Paste direct MP4, Streamtape, or Cloud Drive video link..."
                   value={videoUrl}
                   onChange={(e) => setVideoUrl(e.target.value)}
                   disabled={isBuffering}
@@ -357,7 +453,26 @@ export default function App() {
                   className="input-field"
                 />
               </div>
-              <div className="form-buttons-row" style={{ flexWrap: 'wrap', gap: '0.6rem' }}>
+
+              {/* Host Classification Badge */}
+              {activeClassification && activeClassification.type !== 'invalid' && (
+                <div className={`url-detection-badge badge-${activeClassification.type}`}>
+                  <span style={{ fontWeight: 700 }}>Host Detected:</span>
+                  <span>{activeClassification.label}</span>
+                  <span style={{ opacity: 0.7 }}>— {activeClassification.hint}</span>
+                  {activeClassification.type === 'sharepoint' && (
+                    <button
+                      type="button"
+                      onClick={() => setShowGuideModal(true)}
+                      style={{ background: 'none', border: 'none', color: '#22d3ee', textDecoration: 'underline', cursor: 'pointer', fontSize: '0.75rem', marginLeft: '0.25rem', padding: 0 }}
+                    >
+                      View Tips
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <div className="form-buttons-row" style={{ flexWrap: 'wrap', gap: '0.6rem', marginTop: '0.5rem' }}>
                 <button
                   type="button"
                   onClick={(e) => handleDirectStream(e, false)}
@@ -415,11 +530,18 @@ export default function App() {
                 <div className="error-alert-content" style={{ flex: 1 }}>
                   <span className="error-alert-title">Connection / Buffering Notice</span>
                   <span className="error-alert-desc">{errorMessage}</span>
-                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => setShowGuideModal(true)}
+                      className="btn-primary"
+                      style={{ padding: '0.25rem 0.75rem', fontSize: '0.75rem' }}
+                    >
+                      <BookOpenIcon /> View SharePoint & Cloud Guide
+                    </button>
                     {videoUrl && (
                       <button
                         onClick={(e) => handleDirectStream(e, false)}
-                        className="btn-primary"
+                        className="btn-secondary"
                         style={{ padding: '0.25rem 0.75rem', fontSize: '0.75rem' }}
                       >
                         <PlayIcon /> Try Direct Stream (Your IP)
@@ -440,7 +562,7 @@ export default function App() {
             <div className="info-hint-box">
               <InfoIcon />
               <p>
-                <strong>Streaming Modes:</strong> If a video link is IP-locked by the host (like Streamtape / Tapecontent), use <strong>Stream (Your IP)</strong> to play directly. Use <strong>Buffer for Offline</strong> on direct MP4 links to cache them into your browser for zero-stutter playback.
+                <strong>Pro Tip:</strong> For private <strong>SLIIT SharePoint</strong> recordings, either extract the direct media stream link via DevTools or download the video and click <strong>Import Local Video</strong> to enjoy full speed control & offline buffering.
               </p>
             </div>
           </div>
@@ -499,6 +621,7 @@ export default function App() {
                 proxyUrl={activeVideo.proxyUrl}
                 streamMode={activeVideo.streamMode}
                 onSwitchSource={handleSwitchStreamSource}
+                onOpenGuide={() => setShowGuideModal(true)}
               />
             </div>
           ) : (
@@ -510,7 +633,7 @@ export default function App() {
               </div>
               <h3 className="placeholder-title">No Video Active</h3>
               <p className="placeholder-desc">
-                Choose a video from your library list on the right to start watching offline, or paste a URL above to stream or cache it.
+                Choose a video from your library on the right to start watching offline, or paste a URL / import a file to stream or buffer it.
               </p>
             </div>
           )}
@@ -546,7 +669,7 @@ export default function App() {
                   </svg>
                   <p className="empty-library-title">Library is empty</p>
                   <p className="empty-library-desc">
-                    Buffer a direct MP4 link to start building your library.
+                    Buffer a direct MP4 link or import a local video file to start building your library.
                   </p>
                 </div>
               ) : (
@@ -610,6 +733,88 @@ export default function App() {
         </section>
 
       </main>
+
+      {/* SharePoint & Cloud Guide Modal */}
+      {showGuideModal && (
+        <div className="modal-overlay" onClick={() => setShowGuideModal(false)}>
+          <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">
+                <BookOpenIcon /> SharePoint & Cloud Streaming Guide
+              </h3>
+              <button 
+                onClick={() => setShowGuideModal(false)}
+                className="player-close-btn"
+                title="Close Guide"
+              >
+                <svg className="icon-md fill-current" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '0.75rem', padding: '0.85rem 1rem', fontSize: '0.85rem', color: '#fca5a5' }}>
+                <strong>Why did your SharePoint link return HTTP 403?</strong>
+                <p style={{ marginTop: '0.25rem', color: 'hsl(var(--text-secondary))' }}>
+                  Institutional Microsoft 365 / SLIIT SharePoint videos are protected behind your student login session. External servers and proxies cannot access them without your credentials.
+                </p>
+              </div>
+
+              <div className="guide-step-card">
+                <div className="guide-step-header">
+                  <span className="step-num">1</span>
+                  <span className="step-title">Method A: Download & Import (Recommended & 100% Offline)</span>
+                </div>
+                <p className="step-desc">
+                  Download the lecture recording directly from your SLIIT / SharePoint portal, then click <strong>"Import Local Video"</strong> in QuantumBuffer.
+                </p>
+                <p className="step-desc" style={{ color: '#4ade80' }}>
+                  ✓ Instant zero-buffering playback • Saved in browser IndexedDB • Full scrubbing & speed controls.
+                </p>
+              </div>
+
+              <div className="guide-step-card">
+                <div className="guide-step-header">
+                  <span className="step-num">2</span>
+                  <span className="step-title">Method B: Extract Direct Media Stream from Browser DevTools</span>
+                </div>
+                <p className="step-desc">
+                  If you want to stream directly without downloading the entire file:
+                </p>
+                <ol style={{ paddingLeft: '1.25rem', fontSize: '0.85rem', color: 'hsl(var(--text-secondary))', display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                  <li>Open the SharePoint / MS Stream recording in your browser where you are logged in.</li>
+                  <li>Press <strong>F12</strong> (or right-click → <em>Inspect</em>) and click the <strong>Network</strong> tab.</li>
+                  <li>In the filter box, type <code style={{ color: '#22d3ee' }}>media</code> or <code style={{ color: '#22d3ee' }}>.mp4</code>.</li>
+                  <li>Start playing the video on SharePoint. Right-click the video network request → <strong>Copy URL</strong>.</li>
+                  <li>Paste that direct media stream link into QuantumBuffer!</li>
+                </ol>
+              </div>
+
+              <div className="guide-step-card">
+                <div className="guide-step-header">
+                  <span className="step-num">3</span>
+                  <span className="step-title">Google Drive & Dropbox Links</span>
+                </div>
+                <p className="step-desc">
+                  For Google Drive files, make sure the link sharing setting is set to <strong>"Anyone with the link can view"</strong>. QuantumBuffer will automatically convert the preview link into a direct stream URL.
+                </p>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                onClick={() => {
+                  setShowGuideModal(false);
+                  fileInputRef.current?.click();
+                }}
+                className="btn-primary"
+                style={{ padding: '0.5rem 1.25rem' }}
+              >
+                <UploadIcon /> Import Local Video Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer */}
       <footer className="app-footer">

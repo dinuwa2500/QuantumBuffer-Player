@@ -110,6 +110,66 @@ app.get('/api/info', async (req, res) => {
     return res.status(400).json({ success: false, error: 'URL query parameter is required' });
   }
 
+  // URL auto-normalization (Google Drive, Dropbox, SharePoint, etc.)
+  function normalizeVideoUrl(rawUrl) {
+    try {
+      const u = new URL(rawUrl);
+      if (u.hostname.includes('drive.google.com')) {
+        const m = u.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/i);
+        if (m) return `https://drive.google.com/uc?export=download&id=${m[1]}`;
+      }
+      if (u.hostname.includes('dropbox.com') && u.searchParams.get('dl') === '0') {
+        u.searchParams.set('dl', '1');
+        return u.toString();
+      }
+      if (u.hostname.includes('sharepoint.com') && (u.pathname.includes('/:v:/') || u.pathname.includes('/:u:/'))) {
+        if (!u.searchParams.has('download')) {
+          u.searchParams.set('download', '1');
+          return u.toString();
+        }
+      }
+      return rawUrl;
+    } catch (e) {
+      return rawUrl;
+    }
+  }
+
+  videoUrl = normalizeVideoUrl(videoUrl);
+
+  let targetHost = '';
+  try {
+    targetHost = new URL(videoUrl).hostname.toLowerCase();
+  } catch (e) {}
+
+  function getHostErrorHint(status, host) {
+    const isSharePoint = host.includes('sharepoint.com') || host.includes('1drv.ms') || host.includes('onedrive.live.com');
+    const isStreamtape = host.includes('tapecontent.net') || host.includes('streamtape.com');
+    const isGDrive = host.includes('drive.google.com');
+
+    if (isSharePoint) {
+      if (status === 403 || status === 401) {
+        return `Microsoft SharePoint / OneDrive access restricted (HTTP ${status}). This file requires SLIIT / Microsoft 365 login credentials or a public guest link.`;
+      }
+      return `Microsoft SharePoint returned HTTP ${status}. Verify link accessibility.`;
+    }
+
+    if (isStreamtape && status === 403) {
+      return "Streamtape links are locked to your browser's IP address. Click 'Stream (Your IP)' to watch directly.";
+    }
+
+    if (isGDrive && (status === 403 || status === 401)) {
+      return "Google Drive access denied. Ensure the file sharing is set to 'Anyone with the link can view'.";
+    }
+
+    if (status === 403) {
+      return 'Remote server returned HTTP 403 Forbidden. Access is restricted or token has expired.';
+    }
+    if (status === 404) {
+      return 'Remote video host returned HTTP 404. File not found at the specified URL.';
+    }
+    return `Remote video host returned HTTP ${status}.`;
+  }
+
   const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
   const referer = getSmartReferer(videoUrl, req.query.referer || req.headers['x-referer']);
 
@@ -155,15 +215,11 @@ app.get('/api/info', async (req, res) => {
     const acceptRanges = response.headers['accept-ranges'];
 
     if (status >= 400) {
-      let errorHint = `Remote video host returned HTTP ${status}.`;
-      if (status === 403) {
-        errorHint += " Access forbidden: Streamtape links are locked to your browser's IP. Use 'Stream (Your IP)' to play directly.";
-      } else if (status === 404) {
-        errorHint += ' Video file not found at the specified URL.';
-      }
+      const errorHint = getHostErrorHint(status, targetHost);
       return res.json({
         success: false,
         error: errorHint,
+        host: targetHost,
         status,
         contentType
       });
@@ -171,9 +227,17 @@ app.get('/api/info', async (req, res) => {
 
     const isNonMedia = contentType.includes('text/html') || contentType.includes('application/json');
     if (isNonMedia) {
+      let nonMediaHint = `Remote server returned non-video content (${contentType || 'HTML/JSON'}).`;
+      if (targetHost.includes('sharepoint.com') || targetHost.includes('1drv.ms')) {
+        nonMediaHint = 'SharePoint returned a web login page (HTML) instead of raw video stream. The video requires your institutional login or a direct media stream URL.';
+      } else {
+        nonMediaHint += ' The link might be an HTML webpage or login screen rather than a direct video stream.';
+      }
+
       return res.json({
         success: false,
-        error: `Remote server returned non-video content (${contentType || 'HTML/JSON'}). The link might be an HTML page or expired token error.`,
+        error: nonMediaHint,
+        host: targetHost,
         status: 415,
         contentType
       });
